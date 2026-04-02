@@ -13,8 +13,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  PACKAGE_NAME: nhelv
-  BIN_NAME: nhelv
+  PACKAGE_NAME: nelfie
+  BIN_NAME: nelfie
 
 jobs:
   plan:
@@ -73,14 +73,14 @@ jobs:
         include:
           - os: ubuntu-latest
             rust_target: x86_64-unknown-linux-musl
-            artifact_name: nhelv-linux-x86_64-musl
-            bin_name: nhelv
+            artifact_name: nelfie-linux-x86_64-musl
+            bin_name: nelfie
             bin_ext: ""
             use_cross: true
           - os: windows-latest
             rust_target: x86_64-pc-windows-msvc
-            artifact_name: nhelv-windows-x86_64
-            bin_name: nhelv
+            artifact_name: nelfie-windows-x86_64
+            bin_name: nelfie
             bin_ext: ".exe"
             use_cross: false
 

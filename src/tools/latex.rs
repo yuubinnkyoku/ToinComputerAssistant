@@ -12,7 +12,7 @@ use resvg::{tiny_skia, usvg};
 use serde_json::json;
 use serenity::all::{ChannelId, CreateAttachment, CreateMessage, MessageId};
 
-use crate::{context::NhelvContext, lmclient::LMTool};
+use crate::{context::NelfieContext, lmclient::LMTool};
 
 static KATEX_FONT_BYTES: &[&[u8]] = &[
     include_bytes!("../../KaTeX_font/KaTeX_AMS-Regular.ttf"),
@@ -54,7 +54,7 @@ impl LatexExprRenderTool {
         })
     }
 
-    pub async fn render(expr: &str, _ob_ctx: &NhelvContext) -> Result<Vec<u8>> {
+    pub async fn render(expr: &str, _ob_ctx: &NelfieContext) -> Result<Vec<u8>> {
         Self::renderer().render_png_vec(expr)
     }
 }
@@ -219,7 +219,7 @@ impl LMTool for LatexExprRenderTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        ob_ctx: crate::context::NhelvContext,
+        ob_ctx: crate::context::NelfieContext,
     ) -> Result<String, String> {
         // --- 引数パース ---
         let channel_id_str = args

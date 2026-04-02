@@ -4,7 +4,7 @@ use chrono_tz::Tz;
 use log::info;
 use std::collections::HashMap;
 
-use crate::{context::NhelvContext, lmclient::LMTool};
+use crate::{context::NelfieContext, lmclient::LMTool};
 
 pub struct GetTime {}
 
@@ -130,7 +130,7 @@ impl LMTool for GetTime {
         })
     }
 
-    async fn execute(&self, args: serde_json::Value, _ob_ctx: NhelvContext) -> Result<String, String> {
+    async fn execute(&self, args: serde_json::Value, _ob_ctx: NelfieContext) -> Result<String, String> {
         info!("GetTime::run called with args: {:?}", args);
         let country_code = args.get("country_code")
             .and_then(|v| v.as_str())

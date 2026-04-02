@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     config::{ModelResponseParams, Models},
-    context::NhelvContext,
+    context::NelfieContext,
 };
 
 pub use async_openai::types::responses::Role;
@@ -41,7 +41,7 @@ impl LMClient {
     #[allow(clippy::too_many_arguments)]
     pub async fn generate_response(
         &self,
-        ob_ctx: NhelvContext,
+        ob_ctx: NelfieContext,
         lm_context: &LMContext,
         max_tokens: Option<u32>,
         tools: Option<Arc<HashMap<String, Box<dyn LMTool>>>>,
@@ -517,6 +517,6 @@ pub trait LMTool: Send + Sync {
     async fn execute(
         &self,
         args: serde_json::Value,
-        ob_ctx: NhelvContext,
+        ob_ctx: NelfieContext,
     ) -> Result<String, String>;
 }

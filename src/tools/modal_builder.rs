@@ -1,7 +1,4 @@
-use std::{
-    str::FromStr,
-    sync::atomic::Ordering,
-};
+use std::{str::FromStr, sync::atomic::Ordering};
 
 use serde_json::json;
 use serenity::all::{
@@ -295,7 +292,7 @@ impl LMTool for ModalBuilderTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        ob_ctx: crate::context::NhelvContext,
+        ob_ctx: crate::context::NelfieContext,
     ) -> Result<String, String> {
         let operation = args
             .get("operation")
@@ -330,7 +327,9 @@ impl LMTool for ModalBuilderTool {
                     modal: spec.clone(),
                     submit_custom_id: submit_custom_id.clone(),
                 };
-                ob_ctx.pending_modals.insert(trigger_custom_id.clone(), pending);
+                ob_ctx
+                    .pending_modals
+                    .insert(trigger_custom_id.clone(), pending);
 
                 let trigger_label = args
                     .get("trigger_label")

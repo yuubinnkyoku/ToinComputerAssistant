@@ -33,7 +33,7 @@ use crate::{
 /// 全体共有コンテキスト
 /// Arcで実装されてるのでcloneは単に参照カウントの増加
 #[derive(Clone)]
-pub struct NhelvContext {
+pub struct NelfieContext {
     pub lm_client: Arc<LMClient>,
     pub config: Arc<Config>,
     pub chat_contexts: Arc<ChatContexts>,
@@ -84,8 +84,8 @@ pub struct DisabledContextWrapperInner {
     pub cache: Arc<serenity::cache::Cache>,
 }
 
-impl NhelvContext {
-    pub async fn new() -> NhelvContext {
+impl NelfieContext {
+    pub async fn new() -> NelfieContext {
         let config = Config::new();
         let voice_system = VoiceSystem::new(
             config.voicevox_default_speaker,
@@ -114,7 +114,7 @@ impl NhelvContext {
         .map(|tool| (tool.name(), tool))
         .collect();
 
-        NhelvContext {
+        NelfieContext {
             lm_client: Arc::new(lm_client),
             config: Arc::new(config.clone()),
             chat_contexts: Arc::new(ChatContexts::new(config.system_prompt.clone())),
@@ -217,7 +217,7 @@ impl NhelvContext {
         self.voice_system.clear_all();
 
         self.response_seq.store(1, Ordering::Relaxed);
-        info!("Shutting down NhelvContext...");
+        info!("Shutting down NelfieContext...");
         Ok(())
     }
 }

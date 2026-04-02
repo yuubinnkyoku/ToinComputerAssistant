@@ -1,4 +1,4 @@
-use nhelv::context::NhelvContext;
+use nelfie::context::NelfieContext;
 
 #[tokio::main]
 async fn main() {
@@ -7,13 +7,13 @@ async fn main() {
         .unwrap_or(());
 
     // コンテキスト初期化
-    let ob_ctx = NhelvContext::new().await;
+    let ob_ctx = NelfieContext::new().await;
     if let Err(e) = ob_ctx.start_discord().await {
         eprintln!("failed to start discord bot: {}", e);
         return;
     }
 
-    println!("nhelv started. Press Ctrl-C to shutdown...");
+    println!("nelfie started. Press Ctrl-C to shutdown...");
     if let Err(e) = tokio::signal::ctrl_c().await {
         eprintln!("failed to listen for Ctrl-C: {}", e);
     }

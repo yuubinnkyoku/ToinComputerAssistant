@@ -1,8 +1,8 @@
 <div align="center">
-<h1>Nhelv</h1>
+<h1>Nelfie</h1>
 </div>
 
-Nhelv(ネルフ) は、Discord 上で会話・ツール実行・VOICEVOX 読み上げを統合して動かす Rust 製の bot です。
+Nelfie(ネルフィー) は、Discord 上で会話・ツール実行・VOICEVOX 読み上げを統合して動かす Rust 製の bot です。
 Observer-rust の後継プロジェクトとして、スタンドアローン動作を前提に設計されており、OpenAI API を利用した会話機能を中心に、様々なツールや機能を提供します。
 
 ## 機能

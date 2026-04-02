@@ -13,7 +13,7 @@ use crate::{
         VOICE_DICTIONARY_MAX_ENTRIES, VOICE_PARALLEL_COUNT_DEFAULT, VOICE_PARALLEL_COUNT_MAX,
     },
     config::Models,
-    context::NhelvContext,
+    context::NelfieContext,
     tools::latex::LatexExprRenderTool,
     voice::{SpeakOptions, apply_tts_dictionary, voice_catalog},
 };
@@ -22,7 +22,7 @@ use crate::{
 type Error = Box<dyn std::error::Error + Send + Sync>;
 
 // 毎回書くのがだるいので type alias
-type Context<'a> = poise::Context<'a, NhelvContext, Error>;
+type Context<'a> = poise::Context<'a, NelfieContext, Error>;
 
 async fn send_vc_embed(ctx: &Context<'_>, embed: CreateEmbed) -> Result<(), Error> {
     match ctx {
@@ -316,7 +316,7 @@ pub async fn clear(ctx: Context<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-/// to enable nhelv bot
+/// to enable nelfie bot
 #[poise::command(slash_command, prefix_command)]
 pub async fn enable(ctx: Context<'_>) -> Result<(), Error> {
     let channel_id = ctx.channel_id();
@@ -337,7 +337,7 @@ pub async fn enable(ctx: Context<'_>) -> Result<(), Error> {
     }
 }
 
-/// to disable nhelv bot
+/// to disable nelfie bot
 #[poise::command(slash_command, prefix_command)]
 pub async fn disable(ctx: Context<'_>) -> Result<(), Error> {
     let channel_id = ctx.channel_id();

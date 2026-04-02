@@ -157,7 +157,7 @@ impl LMTool for DiscordTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        ob_ctx: crate::context::NhelvContext,
+        ob_ctx: crate::context::NelfieContext,
     ) -> Result<String, String> {
         let operation = args
             .get("operation")

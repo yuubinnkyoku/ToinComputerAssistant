@@ -14,7 +14,7 @@ use tokio::{sync::mpsc, time::sleep};
 
 use crate::{
     commands::log_err,
-    context::NhelvContext,
+    context::NelfieContext,
     lmclient::{LMContext, Role},
     voice::{SpeakOptions, apply_tts_dictionary, build_tts_text_from_message},
 };
@@ -24,8 +24,8 @@ use crate::{
 pub async fn event_handler(
     ctx: &serenity::client::Context,
     event: &FullEvent,
-    framework: poise::FrameworkContext<'_, NhelvContext, Box<dyn Error + Send + Sync>>,
-    data: &NhelvContext,
+    framework: poise::FrameworkContext<'_, NelfieContext, Box<dyn Error + Send + Sync>>,
+    data: &NelfieContext,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     match event {
         // メッセージうけとったとき
@@ -79,7 +79,7 @@ async fn handle_voice_state_update(
     ctx: &serenity::client::Context,
     old: Option<&VoiceState>,
     new: &VoiceState,
-    ob_context: &NhelvContext,
+    ob_context: &NelfieContext,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let Some(guild_id) = new
         .guild_id
@@ -185,7 +185,7 @@ async fn handle_voice_state_update(
 async fn handle_interaction(
     ctx: &serenity::client::Context,
     interaction: &Interaction,
-    ob_context: &NhelvContext,
+    ob_context: &NelfieContext,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     match interaction {
         Interaction::Component(component) => {
@@ -268,7 +268,7 @@ async fn update_presence(ctx: &serenity::client::Context) {
     ))));
 }
 
-fn remove_channel_context(channel_id: serenity::all::ChannelId, ob_context: &NhelvContext) {
+fn remove_channel_context(channel_id: serenity::all::ChannelId, ob_context: &NelfieContext) {
     if ob_context.chat_contexts.remove_channel(channel_id) {
         info!(
             "Removed chat context for deleted channel {}",
@@ -279,7 +279,7 @@ fn remove_channel_context(channel_id: serenity::all::ChannelId, ob_context: &Nhe
 
 async fn handle_emoji_reaction(
     reaction: &serenity::model::channel::Reaction,
-    ob_context: &NhelvContext,
+    ob_context: &NelfieContext,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     // ここでリアクション追加時の処理を実装可能
     let channel_id = reaction.channel_id;
@@ -312,8 +312,8 @@ async fn handle_emoji_reaction(
 async fn handle_message(
     ctx: &serenity::client::Context,
     msg: &Message,
-    _framework: poise::FrameworkContext<'_, NhelvContext, Box<dyn Error + Send + Sync>>,
-    ob_context: &NhelvContext,
+    _framework: poise::FrameworkContext<'_, NelfieContext, Box<dyn Error + Send + Sync>>,
+    ob_context: &NelfieContext,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let channel_id = msg.channel_id;
 
@@ -426,7 +426,7 @@ async fn handle_message(
 fn schedule_latest_response(
     ctx: &serenity::client::Context,
     msg: &Message,
-    ob_context: &NhelvContext,
+    ob_context: &NelfieContext,
 ) {
     let channel_id = msg.channel_id;
     let request_id = ob_context.response_seq.fetch_add(1, Ordering::Relaxed);
@@ -466,7 +466,7 @@ fn schedule_latest_response(
 async fn run_response_task(
     ctx: &serenity::client::Context,
     msg: &Message,
-    ob_context: &NhelvContext,
+    ob_context: &NelfieContext,
     request_id: u64,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let start = Instant::now();
