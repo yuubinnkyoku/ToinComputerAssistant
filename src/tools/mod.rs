@@ -1,0 +1,12 @@
+pub mod discord;
+pub mod get_time;
+pub mod latex;
+pub mod modal_builder;
+pub mod voicevox;
+// pub mod www_search;
+// pub mod web_scraper;
+// pub mod memory;
+// pub mod text_len;
+// pub mod web_deploy;
+// pub mod image_captioner;
+// pub mod browsing_worker;
