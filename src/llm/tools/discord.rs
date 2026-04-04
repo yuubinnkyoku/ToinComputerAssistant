@@ -6,7 +6,7 @@ use serenity::all::{
     GuildId, Message, MessageId, ReactionType,
 };
 
-use crate::lmclient::{LMTool, Role};
+use crate::llm::client::{LMTool, Role};
 
 pub struct DiscordTool;
 
@@ -157,7 +157,7 @@ impl LMTool for DiscordTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        ob_ctx: crate::context::NelfieContext,
+        ob_ctx: crate::app::context::NelfieContext,
     ) -> Result<String, String> {
         let operation = args
             .get("operation")

@@ -5,7 +5,7 @@ use log::{error, warn};
 use serde_json::{Value, json};
 use serenity::all::ChannelId;
 
-use crate::lmclient::LMContext;
+use crate::llm::client::LMContext;
 
 const CHAT_CONTEXTS_STORE_PATH: &str = "data/runtime/chat_contexts.json";
 pub const VOICE_DICTIONARY_MAX_ENTRIES: usize = 512;

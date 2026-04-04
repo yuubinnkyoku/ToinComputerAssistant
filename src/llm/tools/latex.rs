@@ -12,28 +12,28 @@ use resvg::{tiny_skia, usvg};
 use serde_json::json;
 use serenity::all::{ChannelId, CreateAttachment, CreateMessage, MessageId};
 
-use crate::{context::NelfieContext, lmclient::LMTool};
+use crate::{app::context::NelfieContext, llm::client::LMTool};
 
 static KATEX_FONT_BYTES: &[&[u8]] = &[
-    include_bytes!("../../KaTeX_font/KaTeX_AMS-Regular.ttf"),
-    include_bytes!("../../KaTeX_font/KaTeX_Caligraphic-Bold.ttf"),
-    include_bytes!("../../KaTeX_font/KaTeX_Caligraphic-Regular.ttf"),
-    include_bytes!("../../KaTeX_font/KaTeX_Fraktur-Bold.ttf"),
-    include_bytes!("../../KaTeX_font/KaTeX_Fraktur-Regular.ttf"),
-    include_bytes!("../../KaTeX_font/KaTeX_Main-Bold.ttf"),
-    include_bytes!("../../KaTeX_font/KaTeX_Main-BoldItalic.ttf"),
-    include_bytes!("../../KaTeX_font/KaTeX_Main-Italic.ttf"),
-    include_bytes!("../../KaTeX_font/KaTeX_Main-Regular.ttf"),
-    include_bytes!("../../KaTeX_font/KaTeX_Math-BoldItalic.ttf"),
-    include_bytes!("../../KaTeX_font/KaTeX_Math-Italic.ttf"),
-    include_bytes!("../../KaTeX_font/KaTeX_SansSerif-Bold.ttf"),
-    include_bytes!("../../KaTeX_font/KaTeX_SansSerif-Italic.ttf"),
-    include_bytes!("../../KaTeX_font/KaTeX_SansSerif-Regular.ttf"),
-    include_bytes!("../../KaTeX_font/KaTeX_Script-Regular.ttf"),
-    include_bytes!("../../KaTeX_font/KaTeX_Size1-Regular.ttf"),
-    include_bytes!("../../KaTeX_font/KaTeX_Size2-Regular.ttf"),
-    include_bytes!("../../KaTeX_font/KaTeX_Size3-Regular.ttf"),
-    include_bytes!("../../KaTeX_font/KaTeX_Typewriter-Regular.ttf"),
+    include_bytes!("../../../KaTeX_font/KaTeX_AMS-Regular.ttf"),
+    include_bytes!("../../../KaTeX_font/KaTeX_Caligraphic-Bold.ttf"),
+    include_bytes!("../../../KaTeX_font/KaTeX_Caligraphic-Regular.ttf"),
+    include_bytes!("../../../KaTeX_font/KaTeX_Fraktur-Bold.ttf"),
+    include_bytes!("../../../KaTeX_font/KaTeX_Fraktur-Regular.ttf"),
+    include_bytes!("../../../KaTeX_font/KaTeX_Main-Bold.ttf"),
+    include_bytes!("../../../KaTeX_font/KaTeX_Main-BoldItalic.ttf"),
+    include_bytes!("../../../KaTeX_font/KaTeX_Main-Italic.ttf"),
+    include_bytes!("../../../KaTeX_font/KaTeX_Main-Regular.ttf"),
+    include_bytes!("../../../KaTeX_font/KaTeX_Math-BoldItalic.ttf"),
+    include_bytes!("../../../KaTeX_font/KaTeX_Math-Italic.ttf"),
+    include_bytes!("../../../KaTeX_font/KaTeX_SansSerif-Bold.ttf"),
+    include_bytes!("../../../KaTeX_font/KaTeX_SansSerif-Italic.ttf"),
+    include_bytes!("../../../KaTeX_font/KaTeX_SansSerif-Regular.ttf"),
+    include_bytes!("../../../KaTeX_font/KaTeX_Script-Regular.ttf"),
+    include_bytes!("../../../KaTeX_font/KaTeX_Size1-Regular.ttf"),
+    include_bytes!("../../../KaTeX_font/KaTeX_Size2-Regular.ttf"),
+    include_bytes!("../../../KaTeX_font/KaTeX_Size3-Regular.ttf"),
+    include_bytes!("../../../KaTeX_font/KaTeX_Typewriter-Regular.ttf"),
 ];
 
 static KATEX_RENDERER: OnceLock<KaTeX2Png> = OnceLock::new();
@@ -219,7 +219,7 @@ impl LMTool for LatexExprRenderTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        ob_ctx: crate::context::NelfieContext,
+        ob_ctx: crate::app::context::NelfieContext,
     ) -> Result<String, String> {
         // --- 引数パース ---
         let channel_id_str = args

@@ -1,3 +1,4 @@
+use crate::voice::{SpeakOptions, apply_tts_dictionary, voice_catalog};
 use std::time::Instant;
 
 use log::{error, info, warn};
@@ -9,13 +10,12 @@ use serenity::all::{
 };
 
 use crate::{
-    channel::{
+    app::config::Models,
+    app::context::NelfieContext,
+    llm::channel::{
         VOICE_DICTIONARY_MAX_ENTRIES, VOICE_PARALLEL_COUNT_DEFAULT, VOICE_PARALLEL_COUNT_MAX,
     },
-    config::Models,
-    context::NelfieContext,
-    tools::latex::LatexExprRenderTool,
-    voice::{SpeakOptions, apply_tts_dictionary, voice_catalog},
+    llm::tools::latex::LatexExprRenderTool,
 };
 
 // エラー型（とりあえず Box に投げるスタイルでOK）

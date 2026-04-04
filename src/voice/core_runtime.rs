@@ -1,12 +1,13 @@
 use std::{
     collections::HashMap,
-    io::Cursor,
+    io::{Cursor, Read},
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use flate2::read::GzDecoder;
 use log::{info, warn};
+use once_cell::sync::OnceCell;
 use reqwest::{
     Client as HttpClient,
     header::{ACCEPT, AUTHORIZATION, USER_AGENT},
@@ -24,12 +25,18 @@ const OPEN_JTALK_TAG: &str = "v1.11.1";
 const OPEN_JTALK_ASSET_NAME: &str = "open_jtalk_dic_utf_8-1.11.tar.gz";
 
 const VOICEVOX_VVM_REPO: &str = "VOICEVOX/voicevox_vvm";
+const VOICEVOX_ONNXRUNTIME_REPO: &str = "VOICEVOX/onnxruntime-builder";
+const ONNXRUNTIME_RELEASE_TAG_PREFIX: &str = "voicevox_onnxruntime";
+const ONNXRUNTIME_ASSET_PREFIX: &str = "voicevox_";
 const MODELS_DIR_NAME: &str = "vvms";
 const MODELS_TERMS_FILE: &str = "TERMS.txt";
 const MODELS_README_FILE: &str = "README.txt";
 const SUPPORTED_VVM_MAJOR: u64 = 0;
 const SUPPORTED_VVM_MINOR: u64 = 16;
 const VVM_RELEASE_MARKER_FILE: &str = ".nelfie_vvm_release_tag";
+const VVM_DOWNLOAD_CONCURRENCY: usize = 4;
+
+static GITHUB_HTTP_CLIENT: OnceCell<HttpClient> = OnceCell::new();
 
 #[derive(Debug, Deserialize)]
 struct GithubRelease {
@@ -50,8 +57,258 @@ struct GithubAsset {
 #[derive(Debug)]
 struct DiscoveredModel {
     model_path: PathBuf,
+    voice_model: VoiceModelFile,
     style_ids: Vec<u32>,
     version_key: String,
+}
+
+struct VoiceVoxInitDownloader;
+
+impl VoiceVoxInitDownloader {
+    async fn prepare(config: &VoiceCoreConfig) -> Result<(), String> {
+        let dict_dir = PathBuf::from(&config.open_jtalk_dict_dir);
+        let vvm_dir = PathBuf::from(&config.vvm_dir);
+
+        // 起動待ち時間を短縮するため、独立したアセット準備を並列化する。
+        tokio::try_join!(
+            Self::ensure_onnxruntime_library(config),
+            CoreRuntime::ensure_open_jtalk_dictionary(&dict_dir),
+            CoreRuntime::ensure_vvm_models(&vvm_dir),
+        )?;
+
+        if vvm_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| !name.eq_ignore_ascii_case(MODELS_DIR_NAME))
+            .unwrap_or(false)
+        {
+            warn!(
+                "VVM directory '{}' does not end with '{}'; ensure this is intentional",
+                vvm_dir.display(),
+                MODELS_DIR_NAME
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn ensure_onnxruntime_library(config: &VoiceCoreConfig) -> Result<(), String> {
+        if !config.onnxruntime_filename.trim().is_empty() {
+            info!("VOICEVOX_ONNXRUNTIME_FILENAME is set; skipping ONNX Runtime auto-download");
+            return Ok(());
+        }
+
+        if Self::has_auto_discoverable_onnxruntime_library() {
+            return Ok(());
+        }
+
+        let release_tag = Self::onnxruntime_release_tag();
+        let asset_name = Self::onnxruntime_asset_name()?;
+
+        info!(
+            "ONNX Runtime library is missing; downloading '{}' from release '{}'",
+            asset_name, release_tag
+        );
+
+        let release = CoreRuntime::fetch_release_by_tag(VOICEVOX_ONNXRUNTIME_REPO, &release_tag)
+            .await
+            .map_err(|e| {
+                format!(
+                    "failed to fetch ONNX Runtime release '{}' from '{}': {}",
+                    release_tag, VOICEVOX_ONNXRUNTIME_REPO, e
+                )
+            })?;
+
+        let asset = release
+            .assets
+            .iter()
+            .find(|asset| asset.name == asset_name)
+            .ok_or_else(|| {
+                format!(
+                    "ONNX Runtime asset '{}' was not found in release '{}' of '{}'",
+                    asset_name, release.tag_name, VOICEVOX_ONNXRUNTIME_REPO
+                )
+            })?;
+
+        let archive = CoreRuntime::download_asset_bytes(&asset.browser_download_url).await?;
+        let output_dir = Self::choose_onnxruntime_download_dir()?;
+        let extracted = Self::extract_onnxruntime_libraries(&archive, &output_dir)?;
+
+        if extracted == 0 {
+            return Err(format!(
+                "ONNX Runtime archive '{}' did not contain '{}'",
+                asset_name,
+                Onnxruntime::LIB_VERSIONED_FILENAME
+            ));
+        }
+
+        if !Self::has_auto_discoverable_onnxruntime_library() {
+            return Err(format!(
+                "ONNX Runtime download completed, but '{}' is still unavailable in auto-discovery paths",
+                Onnxruntime::LIB_VERSIONED_FILENAME
+            ));
+        }
+
+        info!(
+            "ONNX Runtime downloaded successfully (tag={}, files={}, output_dir={})",
+            release.tag_name,
+            extracted,
+            output_dir.display()
+        );
+
+        Ok(())
+    }
+
+    fn has_auto_discoverable_onnxruntime_library() -> bool {
+        CoreRuntime::onnxruntime_search_dirs()
+            .into_iter()
+            .any(|dir| {
+                dir.join(Onnxruntime::LIB_VERSIONED_FILENAME).is_file()
+                    || dir.join(Onnxruntime::LIB_UNVERSIONED_FILENAME).is_file()
+            })
+    }
+
+    fn onnxruntime_release_tag() -> String {
+        format!(
+            "{}-{}",
+            ONNXRUNTIME_RELEASE_TAG_PREFIX,
+            Onnxruntime::LIB_VERSION.trim()
+        )
+    }
+
+    fn onnxruntime_asset_name() -> Result<String, String> {
+        let artifact = Self::onnxruntime_artifact_name()?;
+        let version = Onnxruntime::LIB_VERSION.trim();
+        Ok(format!(
+            "{}{}-{}.tgz",
+            ONNXRUNTIME_ASSET_PREFIX, artifact, version
+        ))
+    }
+
+    fn onnxruntime_artifact_name() -> Result<&'static str, String> {
+        match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("windows", "x86_64") => Ok("onnxruntime-win-x64"),
+            ("windows", "x86") => Ok("onnxruntime-win-x86"),
+            ("linux", "x86_64") => Ok("onnxruntime-linux-x64"),
+            ("linux", "aarch64") => Ok("onnxruntime-linux-arm64"),
+            ("linux", "arm") => Ok("onnxruntime-linux-armhf"),
+            ("macos", "x86_64") => Ok("onnxruntime-osx-x86_64"),
+            ("macos", "aarch64") => Ok("onnxruntime-osx-arm64"),
+            ("android", "x86_64") => Ok("onnxruntime-android-x64"),
+            ("android", "aarch64") => Ok("onnxruntime-android-arm64"),
+            (os, arch) => Err(format!(
+                "unsupported platform for ONNX Runtime auto-download: os='{}', arch='{}'",
+                os, arch
+            )),
+        }
+    }
+
+    fn preferred_onnxruntime_download_dirs() -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+
+        if let Ok(current_dir) = std::env::current_dir() {
+            CoreRuntime::push_unique_path(
+                &mut dirs,
+                current_dir
+                    .join("voicevox_core")
+                    .join("onnxruntime")
+                    .join("lib"),
+            );
+            CoreRuntime::push_unique_path(
+                &mut dirs,
+                current_dir.join("voicevox_core").join("onnxruntime"),
+            );
+            CoreRuntime::push_unique_path(&mut dirs, current_dir.join("voicevox_core"));
+            CoreRuntime::push_unique_path(&mut dirs, current_dir);
+        }
+
+        if let Ok(executable_path) = std::env::current_exe()
+            && let Some(executable_dir) = executable_path.parent()
+        {
+            let executable_dir = executable_dir.to_path_buf();
+            CoreRuntime::push_unique_path(
+                &mut dirs,
+                executable_dir
+                    .join("voicevox_core")
+                    .join("onnxruntime")
+                    .join("lib"),
+            );
+            CoreRuntime::push_unique_path(
+                &mut dirs,
+                executable_dir.join("voicevox_core").join("onnxruntime"),
+            );
+            CoreRuntime::push_unique_path(&mut dirs, executable_dir.join("voicevox_core"));
+            CoreRuntime::push_unique_path(&mut dirs, executable_dir);
+        }
+
+        dirs
+    }
+
+    fn choose_onnxruntime_download_dir() -> Result<PathBuf, String> {
+        let mut last_error: Option<String> = None;
+
+        for dir in Self::preferred_onnxruntime_download_dirs() {
+            match std::fs::create_dir_all(&dir) {
+                Ok(_) => return Ok(dir),
+                Err(e) => {
+                    last_error = Some(format!("{}: {}", dir.display(), e));
+                }
+            }
+        }
+
+        Err(format!(
+            "failed to prepare ONNX Runtime download directory: {}",
+            last_error.unwrap_or_else(|| "no candidate directories available".to_string())
+        ))
+    }
+
+    fn extract_onnxruntime_libraries(archive: &[u8], output_dir: &Path) -> Result<usize, String> {
+        let mut tar = tar::Archive::new(GzDecoder::new(Cursor::new(archive)));
+        let mut extracted = 0usize;
+
+        for entry in tar
+            .entries()
+            .map_err(|e| format!("failed to read ONNX Runtime archive entries: {e}"))?
+        {
+            let mut entry =
+                entry.map_err(|e| format!("failed to read ONNX Runtime archive entry: {e}"))?;
+            let entry_path = entry
+                .path()
+                .map_err(|e| format!("failed to read ONNX Runtime archive entry path: {e}"))?
+                .into_owned();
+
+            let Some(file_name) = entry_path.file_name().and_then(|v| v.to_str()) else {
+                continue;
+            };
+
+            if file_name != Onnxruntime::LIB_VERSIONED_FILENAME
+                && file_name != Onnxruntime::LIB_UNVERSIONED_FILENAME
+            {
+                continue;
+            }
+
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).map_err(|e| {
+                format!(
+                    "failed to extract ONNX Runtime file '{}' from archive: {}",
+                    file_name, e
+                )
+            })?;
+
+            let out_path = output_dir.join(file_name);
+            std::fs::write(&out_path, bytes).map_err(|e| {
+                format!(
+                    "failed to write ONNX Runtime file '{}': {}",
+                    out_path.display(),
+                    e
+                )
+            })?;
+
+            extracted += 1;
+        }
+
+        Ok(extracted)
+    }
 }
 
 pub(super) struct CoreRuntime {
@@ -70,11 +327,13 @@ impl CoreRuntime {
             .filter(|v| !v.is_empty())
     }
 
-    fn github_http_client() -> Result<HttpClient, String> {
-        HttpClient::builder()
-            .timeout(Duration::from_secs(180))
-            .build()
-            .map_err(|e| format!("failed to build HTTP client: {e}"))
+    fn github_http_client() -> Result<&'static HttpClient, String> {
+        GITHUB_HTTP_CLIENT.get_or_try_init(|| {
+            HttpClient::builder()
+                .timeout(Duration::from_secs(180))
+                .build()
+                .map_err(|e| format!("failed to build HTTP client: {e}"))
+        })
     }
 
     async fn github_api_get<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T, String> {
@@ -303,9 +562,65 @@ impl CoreRuntime {
         };
 
         let bytes = Self::download_asset_bytes(&asset.browser_download_url).await?;
-        std::fs::write(out_path, bytes)
+        tokio::fs::write(out_path, bytes)
+            .await
             .map_err(|e| format!("failed to write {} '{}': {e}", label, out_path.display()))?;
         Ok(true)
+    }
+
+    async fn download_vvm_assets_parallel(
+        release: &GithubRelease,
+        vvm_dir: &Path,
+    ) -> Result<usize, String> {
+        let vvm_assets = release
+            .assets
+            .iter()
+            .filter_map(|asset| {
+                let lower = asset.name.to_ascii_lowercase();
+                if !lower.ends_with(".vvm") {
+                    return None;
+                }
+
+                Some((asset.name.clone(), asset.browser_download_url.clone()))
+            })
+            .collect::<Vec<_>>();
+
+        if vvm_assets.is_empty() {
+            return Err(format!(
+                "no .vvm assets were found in compatible release '{}' of '{}'",
+                release.tag_name, VOICEVOX_VVM_REPO
+            ));
+        }
+
+        let mut join_set = tokio::task::JoinSet::new();
+        let mut next_index = 0usize;
+        let mut downloaded = 0usize;
+
+        while next_index < vvm_assets.len() || !join_set.is_empty() {
+            while join_set.len() < VVM_DOWNLOAD_CONCURRENCY && next_index < vvm_assets.len() {
+                let (asset_name, download_url) = vvm_assets[next_index].clone();
+                next_index += 1;
+                let out_path = vvm_dir.join(asset_name);
+
+                join_set.spawn(async move {
+                    let bytes = Self::download_asset_bytes(&download_url).await?;
+                    tokio::fs::write(&out_path, bytes).await.map_err(|e| {
+                        format!("failed to write VVM file '{}': {e}", out_path.display())
+                    })?;
+
+                    Ok::<(), String>(())
+                });
+            }
+
+            match join_set.join_next().await {
+                Some(Ok(Ok(()))) => downloaded += 1,
+                Some(Ok(Err(e))) => return Err(e),
+                Some(Err(e)) => return Err(format!("failed to join VVM download task: {e}")),
+                None => break,
+            }
+        }
+
+        Ok(downloaded)
     }
 
     fn has_open_jtalk_dictionary(dict_dir: &Path) -> Result<bool, String> {
@@ -432,20 +747,7 @@ impl CoreRuntime {
             );
         }
 
-        let mut downloaded = 0usize;
-
-        for asset in &release.assets {
-            let lower = asset.name.to_ascii_lowercase();
-            if !lower.ends_with(".vvm") {
-                continue;
-            }
-
-            let bytes = Self::download_asset_bytes(&asset.browser_download_url).await?;
-            let out_path = vvm_dir.join(&asset.name);
-            std::fs::write(&out_path, bytes)
-                .map_err(|e| format!("failed to write VVM file '{}': {e}", out_path.display()))?;
-            downloaded += 1;
-        }
+        let downloaded = Self::download_vvm_assets_parallel(&release, vvm_dir).await?;
 
         let readme_path = models_root.join(MODELS_README_FILE);
         Self::write_release_asset_if_exists(
@@ -464,13 +766,6 @@ impl CoreRuntime {
             "models terms",
         )
         .await?;
-
-        if downloaded == 0 {
-            return Err(format!(
-                "no .vvm assets were found in compatible release '{}' of '{}'",
-                release.tag_name, VOICEVOX_VVM_REPO
-            ));
-        }
 
         if !Self::has_vvm_assets(vvm_dir)? {
             return Err(format!(
@@ -495,26 +790,7 @@ impl CoreRuntime {
     }
 
     async fn ensure_required_assets(config: &VoiceCoreConfig) -> Result<(), String> {
-        let dict_dir = PathBuf::from(&config.open_jtalk_dict_dir);
-        let vvm_dir = PathBuf::from(&config.vvm_dir);
-
-        Self::ensure_open_jtalk_dictionary(&dict_dir).await?;
-        Self::ensure_vvm_models(&vvm_dir).await?;
-
-        if vvm_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(|name| !name.eq_ignore_ascii_case(MODELS_DIR_NAME))
-            .unwrap_or(false)
-        {
-            warn!(
-                "VVM directory '{}' does not end with '{}'; ensure this is intentional",
-                vvm_dir.display(),
-                MODELS_DIR_NAME
-            );
-        }
-
-        Ok(())
+        VoiceVoxInitDownloader::prepare(config).await
     }
 
     fn parse_acceleration_mode(mode: &str) -> AccelerationMode {
@@ -537,24 +813,214 @@ impl CoreRuntime {
         }
     }
 
+    fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+
+    fn push_unique_candidate(candidates: &mut Vec<String>, candidate: String) {
+        if !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+
+    fn onnxruntime_search_dirs() -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+
+        if let Ok(current_dir) = std::env::current_dir() {
+            Self::push_unique_path(&mut dirs, current_dir.clone());
+            Self::push_unique_path(&mut dirs, current_dir.join("voicevox_core"));
+            Self::push_unique_path(
+                &mut dirs,
+                current_dir.join("voicevox_core").join("onnxruntime"),
+            );
+            Self::push_unique_path(
+                &mut dirs,
+                current_dir
+                    .join("voicevox_core")
+                    .join("onnxruntime")
+                    .join("lib"),
+            );
+        }
+
+        if let Ok(executable_path) = std::env::current_exe()
+            && let Some(executable_dir) = executable_path.parent()
+        {
+            let executable_dir = executable_dir.to_path_buf();
+            Self::push_unique_path(&mut dirs, executable_dir.clone());
+            Self::push_unique_path(&mut dirs, executable_dir.join("voicevox_core"));
+            Self::push_unique_path(
+                &mut dirs,
+                executable_dir.join("voicevox_core").join("onnxruntime"),
+            );
+            Self::push_unique_path(
+                &mut dirs,
+                executable_dir
+                    .join("voicevox_core")
+                    .join("onnxruntime")
+                    .join("lib"),
+            );
+        }
+
+        dirs
+    }
+
+    fn build_auto_onnxruntime_candidates() -> Vec<String> {
+        let mut candidates = Vec::new();
+
+        for dir in Self::onnxruntime_search_dirs() {
+            for filename in [
+                Onnxruntime::LIB_VERSIONED_FILENAME,
+                Onnxruntime::LIB_UNVERSIONED_FILENAME,
+            ] {
+                let path = dir.join(filename);
+                if path.is_file() {
+                    Self::push_unique_candidate(
+                        &mut candidates,
+                        path.to_string_lossy().into_owned(),
+                    );
+                }
+            }
+        }
+
+        Self::push_unique_candidate(
+            &mut candidates,
+            Onnxruntime::LIB_VERSIONED_FILENAME.to_string(),
+        );
+        Self::push_unique_candidate(
+            &mut candidates,
+            Onnxruntime::LIB_UNVERSIONED_FILENAME.to_string(),
+        );
+        candidates
+    }
+
+    fn build_configured_onnxruntime_candidates(configured: &str) -> Vec<String> {
+        let configured = configured.trim();
+        if configured.is_empty() {
+            return Vec::new();
+        }
+
+        let mut candidates = Vec::new();
+        let configured_path = PathBuf::from(configured);
+
+        if configured_path.is_file() {
+            Self::push_unique_candidate(
+                &mut candidates,
+                configured_path.to_string_lossy().into_owned(),
+            );
+        }
+
+        if !configured_path.is_absolute() {
+            if let Ok(current_dir) = std::env::current_dir() {
+                let from_current_dir = current_dir.join(configured);
+                if from_current_dir.is_file() {
+                    Self::push_unique_candidate(
+                        &mut candidates,
+                        from_current_dir.to_string_lossy().into_owned(),
+                    );
+                }
+            }
+
+            if let Ok(executable_path) = std::env::current_exe()
+                && let Some(executable_dir) = executable_path.parent()
+            {
+                let from_executable_dir = executable_dir.join(configured);
+                if from_executable_dir.is_file() {
+                    Self::push_unique_candidate(
+                        &mut candidates,
+                        from_executable_dir.to_string_lossy().into_owned(),
+                    );
+                }
+
+                let from_voicevox_core = executable_dir.join("voicevox_core").join(configured);
+                if from_voicevox_core.is_file() {
+                    Self::push_unique_candidate(
+                        &mut candidates,
+                        from_voicevox_core.to_string_lossy().into_owned(),
+                    );
+                }
+            }
+        }
+
+        // 最後に元の値を足して、PATH解決やモジュール名解決も試せるようにする。
+        Self::push_unique_candidate(&mut candidates, configured.to_string());
+        candidates
+    }
+
+    async fn try_load_onnxruntime_with_candidates(
+        candidates: Vec<String>,
+    ) -> Result<(&'static Onnxruntime, String), Vec<String>> {
+        let mut failed_attempts = Vec::new();
+
+        for candidate in candidates {
+            match Onnxruntime::load_once()
+                .filename(candidate.clone())
+                .perform()
+                .await
+            {
+                Ok(ort) => return Ok((ort, candidate)),
+                Err(e) => failed_attempts.push(format!("{} => {}", candidate, e)),
+            }
+        }
+
+        Err(failed_attempts)
+    }
+
     async fn load_onnxruntime(config: &VoiceCoreConfig) -> Result<&'static Onnxruntime, String> {
         if let Some(existing) = Onnxruntime::get() {
             return Ok(existing);
         }
 
-        if !config.onnxruntime_filename.trim().is_empty() {
-            info!(
-                "VOICEVOX_ONNXRUNTIME_FILENAME is ignored because voicevox_core is built with 'link-onnxruntime'"
-            );
+        let configured = config.onnxruntime_filename.trim();
+        if !configured.is_empty() {
+            let configured_candidates = Self::build_configured_onnxruntime_candidates(configured);
+            match Self::try_load_onnxruntime_with_candidates(configured_candidates).await {
+                Ok((ort, loaded_from)) => {
+                    info!(
+                        "ONNX Runtime loaded from VOICEVOX_ONNXRUNTIME_FILENAME candidate: {}",
+                        loaded_from
+                    );
+                    return Ok(ort);
+                }
+                Err(failed_attempts) => {
+                    return Err(format!(
+                        "failed to load ONNX Runtime using VOICEVOX_ONNXRUNTIME_FILENAME='{}' (os='{}', arch='{}', attempts=[{}])",
+                        configured,
+                        std::env::consts::OS,
+                        std::env::consts::ARCH,
+                        failed_attempts.join(" | ")
+                    ));
+                }
+            }
         }
 
-        Onnxruntime::init_once().await.map_err(|e| {
+        let auto_candidates = Self::build_auto_onnxruntime_candidates();
+        if !auto_candidates.is_empty() {
+            match Self::try_load_onnxruntime_with_candidates(auto_candidates).await {
+                Ok((ort, loaded_from)) => {
+                    info!(
+                        "ONNX Runtime auto-loaded with runtime linking from '{}'",
+                        loaded_from
+                    );
+                    return Ok(ort);
+                }
+                Err(failed_attempts) => {
+                    warn!(
+                        "automatic ONNX Runtime load attempts failed; fallback to default loader path (attempts=[{}])",
+                        failed_attempts.join(" | ")
+                    );
+                }
+            }
+        }
+
+        Onnxruntime::load_once().perform().await.map_err(|e| {
             format!(
-                "failed to initialize ONNX Runtime in link mode: {} (os='{}', arch='{}', configured='{}')",
+                "failed to auto-load ONNX Runtime in runtime-link mode: {} (os='{}', arch='{}', default='{}')",
                 e,
                 std::env::consts::OS,
                 std::env::consts::ARCH,
-                config.onnxruntime_filename
+                Onnxruntime::LIB_VERSIONED_FILENAME
             )
         })
     }
@@ -694,6 +1160,7 @@ impl CoreRuntime {
 
             discovered.push(DiscoveredModel {
                 model_path,
+                voice_model: model,
                 style_ids,
                 version_key,
             });
@@ -763,21 +1230,13 @@ impl CoreRuntime {
         let mut load_failed_models = 0usize;
 
         for discovered_model in selected_models {
-            let model_path = &discovered_model.model_path;
-            let model = match VoiceModelFile::open(model_path).await {
-                Ok(model) => model,
-                Err(e) => {
-                    load_failed_models += 1;
-                    warn!(
-                        "failed to open VVM '{}' for loading: {}; skipping",
-                        model_path.display(),
-                        e
-                    );
-                    continue;
-                }
-            };
+            let model_path = discovered_model.model_path.clone();
 
-            if let Err(e) = synthesizer.load_voice_model(&model).perform().await {
+            if let Err(e) = synthesizer
+                .load_voice_model(&discovered_model.voice_model)
+                .perform()
+                .await
+            {
                 load_failed_models += 1;
                 warn!(
                     "failed to load VVM '{}': {}; skipping",
@@ -791,7 +1250,7 @@ impl CoreRuntime {
 
             for style_id in &discovered_model.style_ids {
                 if let Some(prev) = style_to_model.insert(*style_id, model_path.clone())
-                    && prev != *model_path
+                    && prev != model_path
                 {
                     warn!(
                         "style id {} appears in multiple VVMs: '{}' and '{}'; using latest",

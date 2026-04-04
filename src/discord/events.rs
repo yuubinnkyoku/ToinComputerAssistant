@@ -13,9 +13,9 @@ use serenity::all::{
 use tokio::{sync::mpsc, time::sleep};
 
 use crate::{
-    commands::log_err,
-    context::NelfieContext,
-    lmclient::{LMContext, Role},
+    discord::commands::log_err,
+    app::context::NelfieContext,
+    llm::client::{LMContext, Role},
     voice::{SpeakOptions, apply_tts_dictionary, build_tts_text_from_message},
 };
 
@@ -248,7 +248,7 @@ async fn handle_interaction(
                 return Ok(());
             };
 
-            let modal = crate::tools::modal_builder::build_create_modal(
+            let modal = crate::llm::tools::modal_builder::build_create_modal(
                 &pending.modal,
                 &pending.submit_custom_id,
             );
@@ -261,7 +261,7 @@ async fn handle_interaction(
             if !modal
                 .data
                 .custom_id
-                .starts_with(crate::tools::modal_builder::MODAL_SUBMIT_PREFIX)
+                .starts_with(crate::llm::tools::modal_builder::MODAL_SUBMIT_PREFIX)
             {
                 return Ok(());
             }
@@ -507,7 +507,7 @@ fn schedule_latest_response(
         }
     });
 
-    let new_active = crate::context::ActiveResponse {
+    let new_active = crate::app::context::ActiveResponse {
         request_id,
         abort_handle: task_handle.abort_handle(),
     };

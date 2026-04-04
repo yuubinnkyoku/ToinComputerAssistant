@@ -17,16 +17,16 @@ use songbird::SerenityInit;
 use tokio::task::AbortHandle;
 
 use crate::{
-    channel::ChatContexts,
-    commands::{
+    app::config::Config,
+    discord::commands::{
         clear, disable, enable, model, ping, rate_config, set_system_prompt, tex_expr, vc_autoread,
         vc_config, vc_dict, vc_dict_delete, vc_join, vc_leave, vc_say, vc_speaker, vc_status,
     },
-    config::Config,
-    events::event_handler,
-    lmclient::{LMClient, LMTool},
-    tools,
-    user::UserContexts,
+    discord::events::event_handler,
+    llm::channel::ChatContexts,
+    llm::client::{LMClient, LMTool},
+    llm::tools,
+    llm::user::UserContexts,
     voice::{VoiceCoreConfig, VoiceSystem},
 };
 
@@ -129,6 +129,10 @@ impl NelfieContext {
         }
     }
 
+    pub async fn initialize_before_bot_start(&self) -> Result<(), String> {
+        self.voice_system.initialize_on_startup().await
+    }
+
     pub async fn start_discord(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Starting Discord bot...");
 
@@ -175,10 +179,6 @@ impl NelfieContext {
 
                     if let Some(songbird_manager) = songbird::get(ctx).await {
                         ob_ctx.voice_system.set_songbird(songbird_manager);
-                    }
-
-                    if ob_ctx.config.voicevox_preload_on_startup {
-                        ob_ctx.voice_system.warmup_async();
                     }
 
                     poise::builtins::register_globally(ctx, &framework.options().commands).await?;

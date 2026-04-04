@@ -86,6 +86,17 @@ impl VoiceSystem {
         });
     }
 
+    pub async fn initialize_on_startup(&self) -> Result<(), String> {
+        self.core_warmup_started.store(true, Ordering::SeqCst);
+        let started = std::time::Instant::now();
+        self.ensure_core_initialized().await?;
+        info!(
+            "VOICEVOX startup initialization completed in {} ms",
+            started.elapsed().as_millis()
+        );
+        Ok(())
+    }
+
     pub fn set_songbird(&self, manager: Arc<Songbird>) {
         if let Ok(mut w) = self.songbird.write() {
             *w = Some(manager);

@@ -1,4 +1,4 @@
-use nelfie::context::NelfieContext;
+use nelfie::app::context::NelfieContext;
 
 #[tokio::main]
 async fn main() {
@@ -8,6 +8,11 @@ async fn main() {
 
     // コンテキスト初期化
     let ob_ctx = NelfieContext::new().await;
+    if let Err(e) = ob_ctx.initialize_before_bot_start().await {
+        eprintln!("failed to initialize voicevox before bot startup: {}", e);
+        return;
+    }
+
     if let Err(e) = ob_ctx.start_discord().await {
         eprintln!("failed to start discord bot: {}", e);
         return;

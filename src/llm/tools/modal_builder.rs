@@ -6,7 +6,7 @@ use serenity::all::{
     CreateModal, InputTextStyle,
 };
 
-use crate::lmclient::LMTool;
+use crate::llm::client::LMTool;
 
 pub const MODAL_TRIGGER_PREFIX: &str = "modal_builder:open:";
 pub const MODAL_SUBMIT_PREFIX: &str = "modal_builder:submit:";
@@ -292,7 +292,7 @@ impl LMTool for ModalBuilderTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        ob_ctx: crate::context::NelfieContext,
+        ob_ctx: crate::app::context::NelfieContext,
     ) -> Result<String, String> {
         let operation = args
             .get("operation")

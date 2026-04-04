@@ -21,8 +21,8 @@ use serenity::futures::StreamExt;
 use tokio::sync::mpsc;
 
 use crate::{
-    config::{ModelResponseParams, Models},
-    context::NelfieContext,
+    app::config::{ModelResponseParams, Models},
+    app::context::NelfieContext,
 };
 
 pub use async_openai::types::responses::Role;

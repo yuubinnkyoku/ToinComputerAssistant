@@ -2,10 +2,10 @@ use serde_json::{Value, json};
 use serenity::all::{ChannelId, GuildId, UserId};
 
 use crate::{
-    channel::{
+    llm::channel::{
         VOICE_DICTIONARY_MAX_ENTRIES, VOICE_PARALLEL_COUNT_DEFAULT, VOICE_PARALLEL_COUNT_MAX,
     },
-    lmclient::LMTool,
+    llm::client::LMTool,
     voice::{SpeakOptions, apply_tts_dictionary, voice_catalog},
 };
 
@@ -259,7 +259,7 @@ impl LMTool for VoicevoxTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        ob_ctx: crate::context::NelfieContext,
+        ob_ctx: crate::app::context::NelfieContext,
     ) -> Result<String, String> {
         let operation = args
             .get("operation")

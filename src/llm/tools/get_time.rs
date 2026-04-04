@@ -4,7 +4,7 @@ use chrono_tz::Tz;
 use log::info;
 use std::collections::HashMap;
 
-use crate::{context::NelfieContext, lmclient::LMTool};
+use crate::{app::context::NelfieContext, llm::client::LMTool};
 
 pub struct GetTime {}
 
