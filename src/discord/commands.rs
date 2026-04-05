@@ -64,14 +64,14 @@ pub async fn set_system_prompt(
 
     if system_prompt.eq_ignore_ascii_case("reset") {
         ob_ctx.chat_contexts.set_system_prompt(channel_id, None);
-        ctx.say("完了: システムプロンプトをデフォルトに戻しました。")
+        ctx.say("info: システムプロンプトをデフォルトに戻しました。")
             .await?;
     } else {
         ob_ctx
             .chat_contexts
             .set_system_prompt(channel_id, Some(system_prompt.clone()));
         ctx.say(format!(
-            "完了: システムプロンプトを更新しました。\n```{}```",
+            "info: システムプロンプトを更新しました。\n```{}```",
             system_prompt
         ))
         .await?;
@@ -127,7 +127,7 @@ pub async fn rate_config(
 
     let reply = if new_rate_line == 0 {
         format!(
-            "完了: ユーザー `{}` のレート制限を **unlimit** に設定しました。",
+            "info: ユーザー `{}` のレート制限を **unlimit** に設定しました。",
             target_user_id
                 .to_user(ctx.http())
                 .await
@@ -136,7 +136,7 @@ pub async fn rate_config(
         )
     } else {
         format!(
-            "完了: ユーザー `{}` の rate_line を **{}** に設定しました。",
+            "info: ユーザー `{}` の rate_line を **{}** に設定しました。",
             target_user_id
                 .to_user(ctx.http())
                 .await
@@ -182,7 +182,7 @@ pub async fn clear(ctx: Context<'_>) -> Result<(), Error> {
 
     info!("Cleared chat context for channel {}", channel_id);
 
-    ctx.say("完了: チャットコンテキストをクリアしました。")
+    ctx.say("info: チャットコンテキストをクリアしました。")
         .await?;
 
     Ok(())
@@ -196,13 +196,13 @@ pub async fn enable(ctx: Context<'_>) -> Result<(), Error> {
     let ob_ctx = ctx.data();
 
     if ob_ctx.chat_contexts.is_enabled(channel_id) {
-        ctx.say("情報: このチャンネルのチャットコンテキストは既に有効です。")
+        ctx.say("info: このチャンネルのチャットコンテキストは既に有効です。")
             .await?;
         Ok(())
     } else {
         ob_ctx.chat_contexts.set_enabled(channel_id, true);
         ob_ctx.chat_contexts.get_or_create(channel_id);
-        ctx.say("完了: このチャンネルのチャットコンテキストを有効化しました。")
+        ctx.say("info: このチャンネルのチャットコンテキストを有効化しました。")
             .await?;
         info!("Enabled chat context for channel {}", channel_id);
         Ok(())
@@ -217,12 +217,12 @@ pub async fn disable(ctx: Context<'_>) -> Result<(), Error> {
     let ob_ctx = ctx.data();
 
     if !ob_ctx.chat_contexts.is_enabled(channel_id) {
-        ctx.say("情報: このチャンネルのチャットコンテキストは既に無効です。")
+        ctx.say("info: このチャンネルのチャットコンテキストは既に無効です。")
             .await?;
         Ok(())
     } else {
         ob_ctx.chat_contexts.set_enabled(channel_id, false);
-        ctx.say("完了: このチャンネルのチャットコンテキストを無効化しました。")
+        ctx.say("info: このチャンネルのチャットコンテキストを無効化しました。")
             .await?;
         info!("Disabled chat context for channel {}", channel_id);
         Ok(())
@@ -273,7 +273,7 @@ pub async fn set(
     let model = Models::from(model_name);
     ob_ctx.user_contexts.set_model(user_id, model.clone());
 
-    ctx.say(format!("完了: モデルを `{}` に変更しました。", model))
+    ctx.say(format!("info: モデルを `{}` に変更しました。", model))
         .await?;
     Ok(())
 }
