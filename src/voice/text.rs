@@ -232,19 +232,68 @@ pub fn apply_tts_dictionary(input: &str, entries: &[(String, String)]) -> String
         return input.to_string();
     }
 
-    // 長いキーを先に適用して、短いキーによる過剰置換を減らす。
-    let mut sorted = entries
-        .iter()
-        .filter(|(source, target)| !source.is_empty() && !target.is_empty())
-        .collect::<Vec<_>>();
-    sorted.sort_by(|a, b| b.0.chars().count().cmp(&a.0.chars().count()));
+    // 1パス置換で高速化しつつ、英数字カナ化後の文にも辞書が効くよう
+    // source の正規化別名も検索パターンへ追加する。
+    let mut patterns = Vec::<String>::with_capacity(entries.len() * 2);
+    let mut replacements = std::collections::HashMap::<String, String>::with_capacity(entries.len() * 2);
+    let mut seen = std::collections::HashSet::<String>::with_capacity(entries.len() * 2);
 
-    let mut out = input.to_string();
-    for (source, target) in sorted {
-        out = out.replace(source, target);
+    for (source, target) in entries {
+        let source = source.trim();
+        let target = target.trim();
+
+        if source.is_empty() || target.is_empty() {
+            continue;
+        }
+
+        if seen.insert(source.to_string()) {
+            patterns.push(source.to_string());
+            replacements.insert(source.to_string(), target.to_string());
+        }
+
+        if source.as_bytes().iter().any(|b| b.is_ascii_alphabetic()) {
+            let normalized = normalize_ascii_alnum_to_kana(source);
+            if !normalized.is_empty() && normalized != source && seen.insert(normalized.clone()) {
+                patterns.push(normalized.clone());
+                replacements.insert(normalized, target.to_string());
+            }
+        }
     }
 
-    out
+    if patterns.is_empty() {
+        return input.to_string();
+    }
+
+    if patterns.len() == 1 {
+        let source = &patterns[0];
+        let target = replacements
+            .get(source)
+            .cloned()
+            .unwrap_or_else(|| source.clone());
+        return input.replace(source, &target);
+    }
+
+    patterns.sort_by(|a, b| b.chars().count().cmp(&a.chars().count()));
+    let escaped = patterns
+        .iter()
+        .map(|value| regex::escape(value))
+        .collect::<Vec<_>>();
+    let alternation = format!("(?:{})", escaped.join("|"));
+
+    let Ok(re) = Regex::new(&alternation) else {
+        return input.to_string();
+    };
+
+    match re.replace_all(input, |caps: &Captures| {
+        let matched = caps.get(0).map(|m| m.as_str()).unwrap_or_default();
+        replacements
+            .get(matched)
+            .cloned()
+            .unwrap_or_else(|| matched.to_string())
+    }) {
+        Cow::Borrowed(_) => input.to_string(),
+        Cow::Owned(owned) => owned,
+    }
 }
 
 /// 3番目に適用
@@ -738,5 +787,27 @@ mod tests {
     fn decimal_fraction_is_read_digit_by_digit() {
         assert_eq!(normalize_tts_text(".32"), "テンサンニイ");
         assert_eq!(normalize_tts_text("1.32"), "1テンサンニイ");
+    }
+
+    #[test]
+    fn dictionary_matches_ascii_normalized_alias() {
+        let source = "371CPU";
+        let normalized = normalize_ascii_alnum_to_kana(source);
+        let input = format!("{} が参加しました", normalized);
+        let entries = vec![(source.to_string(), "みないっち".to_string())];
+
+        let out = apply_tts_dictionary(&input, &entries);
+        assert_eq!(out, "みないっち が参加しました");
+    }
+
+    #[test]
+    fn dictionary_prefers_longest_match_at_same_position() {
+        let entries = vec![
+            ("abc".to_string(), "X".to_string()),
+            ("abcd".to_string(), "Y".to_string()),
+        ];
+
+        let out = apply_tts_dictionary("abcd abc", &entries);
+        assert_eq!(out, "Y X");
     }
 }
