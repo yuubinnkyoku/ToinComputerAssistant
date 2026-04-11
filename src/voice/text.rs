@@ -235,7 +235,8 @@ pub fn apply_tts_dictionary(input: &str, entries: &[(String, String)]) -> String
     // 1パス置換で高速化しつつ、英数字カナ化後の文にも辞書が効くよう
     // source の正規化別名も検索パターンへ追加する。
     let mut patterns = Vec::<String>::with_capacity(entries.len() * 2);
-    let mut replacements = std::collections::HashMap::<String, String>::with_capacity(entries.len() * 2);
+    let mut replacements =
+        std::collections::HashMap::<String, String>::with_capacity(entries.len() * 2);
     let mut seen = std::collections::HashSet::<String>::with_capacity(entries.len() * 2);
 
     for (source, target) in entries {
