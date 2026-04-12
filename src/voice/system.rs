@@ -13,7 +13,7 @@ use songbird::{
 use tokio::{
     sync::{OnceCell, Semaphore, mpsc},
     task::JoinHandle,
-    time::{Duration, sleep},
+    time::{Duration, sleep, timeout},
 };
 
 use super::{
@@ -29,6 +29,9 @@ const DEFAULT_PARALLEL_READ_COUNT: usize = 1;
 const MAX_PARALLEL_READ_COUNT: usize = 4;
 const TRACK_END_POLL_INTERVAL: Duration = Duration::from_millis(15);
 const TRACK_END_MAX_CONSECUTIVE_ERRORS: usize = 5;
+const QUEUE_FULL_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+const SEGMENT_SYNTHESIS_TIMEOUT: Duration = Duration::from_secs(45);
+const SEGMENT_PLAYBACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn normalize_parallel_count(parallel_count: usize) -> usize {
     parallel_count.clamp(DEFAULT_PARALLEL_READ_COUNT, MAX_PARALLEL_READ_COUNT)
@@ -300,6 +303,7 @@ impl VoiceSystem {
         let normalized_parallel_count = self.set_channel_parallel_count(channel_id, parallel_count);
         let req = SpeakRequest {
             guild_id,
+            channel_id,
             text,
             speaker: resolved_speaker,
             speed_scale,
@@ -310,13 +314,41 @@ impl VoiceSystem {
 
         let queue = self.ensure_queue(channel_id).await;
 
+        debug!(
+            "enqueue voice request guild={} channel={} chars={} speaker={} parallel={}",
+            guild_id.get(),
+            channel_id.get(),
+            req.text.chars().count(),
+            req.speaker,
+            normalized_parallel_count,
+        );
+
         match queue.try_send(req) {
             Ok(()) => Ok(()),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                let err =
-                    format!("Voice queue is full (sequential limit={SEQUENTIAL_QUEUE_CAPACITY})");
-                self.set_last_error(guild_id, err.clone());
-                Err(err)
+            Err(tokio::sync::mpsc::error::TrySendError::Full(req)) => {
+                match timeout(QUEUE_FULL_WAIT_TIMEOUT, queue.send(req)).await {
+                    Ok(Ok(())) => {
+                        debug!(
+                            "voice queue recovered after waiting (guild={}, channel={})",
+                            guild_id.get(),
+                            channel_id.get()
+                        );
+                        Ok(())
+                    }
+                    Ok(Err(_)) => {
+                        let err = "Voice queue is unavailable".to_string();
+                        self.set_last_error(guild_id, err.clone());
+                        Err(err)
+                    }
+                    Err(_) => {
+                        let err = format!(
+                            "Voice queue remained full for {:?} (sequential limit={SEQUENTIAL_QUEUE_CAPACITY})",
+                            QUEUE_FULL_WAIT_TIMEOUT
+                        );
+                        self.set_last_error(guild_id, err.clone());
+                        Err(err)
+                    }
+                }
             }
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 let err = "Voice queue is unavailable".to_string();
@@ -357,11 +389,13 @@ impl VoiceSystem {
                     .map(|entry| Arc::clone(entry.value()))
                     .unwrap_or_else(|| Arc::new(Semaphore::new(DEFAULT_PARALLEL_READ_COUNT)));
 
+                let Ok(permit) = semaphore.acquire_owned().await else {
+                    break;
+                };
+
                 let this = this.clone();
                 tokio::spawn(async move {
-                    let Ok(_permit) = semaphore.acquire_owned().await else {
-                        return;
-                    };
+                    let _permit = permit;
                     this.process_speak_request(req).await;
                 });
             }
@@ -381,6 +415,13 @@ impl VoiceSystem {
             return;
         }
 
+        debug!(
+            "start speak request guild={} channel={} segments={}",
+            req.guild_id.get(),
+            req.channel_id.get(),
+            segments.len(),
+        );
+
         // 1セグメント先読みで、現在セグメント再生中に次セグメントの合成を進める
         // これにより、同一メッセージ内の順序を保ちつつ区切り間の待ちを減らす
         // あと1セグメント先読み以上だと集中時にメモリ爆死する可能性があるから、、メモリ圧は上げないよーに
@@ -399,16 +440,43 @@ impl VoiceSystem {
         );
 
         loop {
-            let wav = match in_flight.await {
-                Ok(Ok(wav)) => wav,
-                Ok(Err(e)) => {
-                    warn!("failed to synthesize voice: {}", e);
-                    self.set_last_error(req.guild_id, e);
-                    return;
-                }
-                Err(e) => {
-                    let err = format!("failed to join segment synthesis task: {e}");
-                    warn!("{}", err);
+            let wav = match timeout(SEGMENT_SYNTHESIS_TIMEOUT, &mut in_flight).await {
+                Ok(joined) => match joined {
+                    Ok(Ok(wav)) => wav,
+                    Ok(Err(e)) => {
+                        warn!(
+                            "failed to synthesize voice (guild={}, channel={}): {}",
+                            req.guild_id.get(),
+                            req.channel_id.get(),
+                            e
+                        );
+                        self.set_last_error(req.guild_id, e);
+                        return;
+                    }
+                    Err(e) => {
+                        let err = format!("failed to join segment synthesis task: {e}");
+                        warn!(
+                            "{} (guild={}, channel={})",
+                            err,
+                            req.guild_id.get(),
+                            req.channel_id.get(),
+                        );
+                        self.set_last_error(req.guild_id, err);
+                        return;
+                    }
+                },
+                Err(_) => {
+                    in_flight.abort();
+                    let err = format!(
+                        "segment synthesis timed out after {:?}",
+                        SEGMENT_SYNTHESIS_TIMEOUT
+                    );
+                    warn!(
+                        "{} (guild={}, channel={})",
+                        err,
+                        req.guild_id.get(),
+                        req.channel_id.get(),
+                    );
                     self.set_last_error(req.guild_id, err);
                     return;
                 }
@@ -424,19 +492,43 @@ impl VoiceSystem {
                 )
             });
 
-            if let Err(e) = self
-                .play_wav_segment(req.guild_id, wav, allow_overlap_playback)
-                .await
+            match timeout(
+                SEGMENT_PLAYBACK_TIMEOUT,
+                self.play_wav_segment(req.guild_id, wav, allow_overlap_playback),
+            )
+            .await
             {
-                if let Some(handle) = next_in_flight {
-                    handle.abort();
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    if let Some(handle) = next_in_flight {
+                        handle.abort();
+                    }
+                    warn!(
+                        "failed to play voice segment (guild={}, channel={}): {}",
+                        req.guild_id.get(),
+                        req.channel_id.get(),
+                        e
+                    );
+                    self.set_last_error(req.guild_id, e);
+                    return;
                 }
-                warn!(
-                    "failed to play voice segment in guild {}: {}",
-                    req.guild_id, e
-                );
-                self.set_last_error(req.guild_id, e);
-                return;
+                Err(_) => {
+                    if let Some(handle) = next_in_flight {
+                        handle.abort();
+                    }
+                    let err = format!(
+                        "segment playback timed out after {:?}",
+                        SEGMENT_PLAYBACK_TIMEOUT
+                    );
+                    warn!(
+                        "{} (guild={}, channel={})",
+                        err,
+                        req.guild_id.get(),
+                        req.channel_id.get(),
+                    );
+                    self.set_last_error(req.guild_id, err);
+                    return;
+                }
             }
 
             match next_in_flight {
@@ -446,6 +538,11 @@ impl VoiceSystem {
         }
 
         self.clear_last_error(req.guild_id);
+        debug!(
+            "finished speak request guild={} channel={}",
+            req.guild_id.get(),
+            req.channel_id.get(),
+        );
     }
 
     fn spawn_segment_synthesis(

@@ -31,6 +31,7 @@ pub struct SpeakOptions {
 #[derive(Clone, Debug)]
 pub(super) struct SpeakRequest {
     pub guild_id: GuildId,
+    pub channel_id: ChannelId,
     pub text: String,
     pub speaker: u32,
     pub speed_scale: Option<f32>,

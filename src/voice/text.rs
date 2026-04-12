@@ -1,4 +1,8 @@
-use std::borrow::Cow;
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex},
+};
 
 use chrono::{FixedOffset, TimeZone, Utc};
 use kanalizer::{ConvertOptions, Kanalizer};
@@ -43,6 +47,113 @@ static RE_LIST: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^\s*(?:[-*]|\d+\.)\s
 const TTS_SEGMENT_SOFT_LIMIT: usize = 36;
 const TTS_SEGMENT_HARD_LIMIT: usize = 60;
 const TTS_MAX_TOTAL_CHARS: usize = 200;
+const TTS_DICTIONARY_CACHE_LIMIT: usize = 64;
+
+static TTS_DICTIONARY_MATCHER_CACHE: Lazy<
+    Mutex<HashMap<Vec<(String, String)>, Arc<CompiledDictionaryMatcher>>>,
+> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+enum DictionaryMatcherKind {
+    Noop,
+    Single { source: String, target: String },
+    Regex(Regex),
+}
+
+struct CompiledDictionaryMatcher {
+    kind: DictionaryMatcherKind,
+    replacements: HashMap<String, String>,
+}
+
+fn build_dictionary_cache_key(entries: &[(String, String)]) -> Vec<(String, String)> {
+    let mut key = Vec::with_capacity(entries.len());
+    for (source, target) in entries {
+        let source = source.trim();
+        let target = target.trim();
+        if source.is_empty() || target.is_empty() {
+            continue;
+        }
+        key.push((source.to_owned(), target.to_owned()));
+    }
+    key
+}
+
+fn compile_dictionary_matcher(entries: &[(String, String)]) -> CompiledDictionaryMatcher {
+    let mut patterns = Vec::<String>::with_capacity(entries.len() * 2);
+    let mut replacements = HashMap::<String, String>::with_capacity(entries.len() * 2);
+    let mut seen = HashSet::<String>::with_capacity(entries.len() * 2);
+
+    for (source, target) in entries {
+        if seen.insert(source.clone()) {
+            patterns.push(source.clone());
+            replacements.insert(source.clone(), target.clone());
+        }
+
+        if source.as_bytes().iter().any(|b| b.is_ascii_alphabetic()) {
+            let normalized = normalize_ascii_alnum_to_kana(source);
+            if !normalized.is_empty() && normalized != *source && seen.insert(normalized.clone()) {
+                patterns.push(normalized.clone());
+                replacements.insert(normalized, target.clone());
+            }
+        }
+    }
+
+    if patterns.is_empty() {
+        return CompiledDictionaryMatcher {
+            kind: DictionaryMatcherKind::Noop,
+            replacements,
+        };
+    }
+
+    if patterns.len() == 1 {
+        let source = patterns[0].clone();
+        let target = replacements
+            .get(&source)
+            .cloned()
+            .unwrap_or_else(|| source.clone());
+
+        return CompiledDictionaryMatcher {
+            kind: DictionaryMatcherKind::Single { source, target },
+            replacements,
+        };
+    }
+
+    patterns.sort_by(|a, b| b.chars().count().cmp(&a.chars().count()));
+    let escaped = patterns
+        .iter()
+        .map(|value| regex::escape(value))
+        .collect::<Vec<_>>();
+    let alternation = format!("(?:{})", escaped.join("|"));
+
+    let kind = Regex::new(&alternation)
+        .map(DictionaryMatcherKind::Regex)
+        .unwrap_or(DictionaryMatcherKind::Noop);
+
+    CompiledDictionaryMatcher { kind, replacements }
+}
+
+fn get_or_build_dictionary_matcher(entries: &[(String, String)]) -> Arc<CompiledDictionaryMatcher> {
+    if let Ok(cache) = TTS_DICTIONARY_MATCHER_CACHE.lock()
+        && let Some(found) = cache.get(entries)
+    {
+        return Arc::clone(found);
+    }
+
+    let compiled = Arc::new(compile_dictionary_matcher(entries));
+
+    if let Ok(mut cache) = TTS_DICTIONARY_MATCHER_CACHE.lock() {
+        if let Some(found) = cache.get(entries) {
+            return Arc::clone(found);
+        }
+
+        if cache.len() >= TTS_DICTIONARY_CACHE_LIMIT {
+            cache.clear();
+        }
+
+        cache.insert(entries.to_vec(), Arc::clone(&compiled));
+    }
+
+    compiled
+}
 
 thread_local! {
     static EN2KANA_DECODER: EN2KANA = EN2KANA::new();
@@ -232,68 +343,31 @@ pub fn apply_tts_dictionary(input: &str, entries: &[(String, String)]) -> String
         return input.to_string();
     }
 
-    // 1パス置換で高速化しつつ、英数字カナ化後の文にも辞書が効くよう
-    // source の正規化別名も検索パターンへ追加する。
-    let mut patterns = Vec::<String>::with_capacity(entries.len() * 2);
-    let mut replacements =
-        std::collections::HashMap::<String, String>::with_capacity(entries.len() * 2);
-    let mut seen = std::collections::HashSet::<String>::with_capacity(entries.len() * 2);
-
-    for (source, target) in entries {
-        let source = source.trim();
-        let target = target.trim();
-
-        if source.is_empty() || target.is_empty() {
-            continue;
-        }
-
-        if seen.insert(source.to_string()) {
-            patterns.push(source.to_string());
-            replacements.insert(source.to_string(), target.to_string());
-        }
-
-        if source.as_bytes().iter().any(|b| b.is_ascii_alphabetic()) {
-            let normalized = normalize_ascii_alnum_to_kana(source);
-            if !normalized.is_empty() && normalized != source && seen.insert(normalized.clone()) {
-                patterns.push(normalized.clone());
-                replacements.insert(normalized, target.to_string());
-            }
-        }
-    }
-
-    if patterns.is_empty() {
+    let cache_key = build_dictionary_cache_key(entries);
+    if cache_key.is_empty() {
         return input.to_string();
     }
 
-    if patterns.len() == 1 {
-        let source = &patterns[0];
-        let target = replacements
-            .get(source)
-            .cloned()
-            .unwrap_or_else(|| source.clone());
-        return input.replace(source, &target);
-    }
+    let matcher = get_or_build_dictionary_matcher(&cache_key);
 
-    patterns.sort_by(|a, b| b.chars().count().cmp(&a.chars().count()));
-    let escaped = patterns
-        .iter()
-        .map(|value| regex::escape(value))
-        .collect::<Vec<_>>();
-    let alternation = format!("(?:{})", escaped.join("|"));
-
-    let Ok(re) = Regex::new(&alternation) else {
-        return input.to_string();
-    };
-
-    match re.replace_all(input, |caps: &Captures| {
-        let matched = caps.get(0).map(|m| m.as_str()).unwrap_or_default();
-        replacements
-            .get(matched)
-            .cloned()
-            .unwrap_or_else(|| matched.to_string())
-    }) {
-        Cow::Borrowed(_) => input.to_string(),
-        Cow::Owned(owned) => owned,
+    match &matcher.kind {
+        DictionaryMatcherKind::Noop => return input.to_string(),
+        DictionaryMatcherKind::Single { source, target } => {
+            return input.replace(source, target);
+        }
+        DictionaryMatcherKind::Regex(re) => {
+            return match re.replace_all(input, |caps: &Captures| {
+                let matched = caps.get(0).map(|m| m.as_str()).unwrap_or_default();
+                matcher
+                    .replacements
+                    .get(matched)
+                    .cloned()
+                    .unwrap_or_else(|| matched.to_string())
+            }) {
+                Cow::Borrowed(_) => input.to_string(),
+                Cow::Owned(owned) => owned,
+            };
+        }
     }
 }
 
