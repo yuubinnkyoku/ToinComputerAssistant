@@ -1357,7 +1357,11 @@ fn build_vc_config_voice_message(
     auto_read: bool,
     parallel_count: usize,
 ) -> String {
-    let action = if is_updating { "VC設定を更新しました。" } else { "現在のVC設定です。" };
+    let action = if is_updating {
+        "VC設定を更新しました。"
+    } else {
+        "現在のVC設定です。"
+    };
     format!(
         "{}システム読み上げは{}。自動読み上げは{}。読み上げモードは{}です。",
         action,
