@@ -358,6 +358,27 @@ impl VoiceSystem {
         }
     }
 
+    pub async fn synthesize_wav(
+        &self,
+        text: impl Into<String>,
+        speaker: u32,
+        speed_scale: Option<f32>,
+        pitch_scale: Option<f32>,
+        pan: Option<f32>,
+    ) -> Result<Vec<u8>, String> {
+        let text = normalize_tts_text(&text.into());
+        if text.is_empty() {
+            return Err("Text is empty".to_string());
+        }
+
+        let speed_scale = enforce_min_speed_for_long_text(&text, speed_scale);
+        let wav = self
+            .synthesize(&text, speaker, speed_scale, pitch_scale)
+            .await?;
+
+        apply_pan_to_wav(wav, pan.map(|v| v.clamp(-1.0, 1.0)))
+    }
+
     async fn ensure_queue(&self, channel_id: ChannelId) -> mpsc::Sender<SpeakRequest> {
         if let Some(existing) = self.channel_queues.get(&channel_id) {
             return existing.clone();

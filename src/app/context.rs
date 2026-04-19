@@ -20,7 +20,8 @@ use crate::{
     app::config::Config,
     discord::commands::{
         clear, disable, enable, model, ping, rate_config, set_system_prompt, tex_expr, vc_autoread,
-        vc_config, vc_dict, vc_dict_delete, vc_join, vc_leave, vc_say, vc_speaker, vc_status,
+        vc_config, vc_dict, vc_dict_delete, vc_download, vc_join, vc_leave, vc_say, vc_speaker,
+        vc_status,
     },
     discord::events::event_handler,
     llm::channel::ChatContexts,
@@ -151,6 +152,7 @@ impl NelfieContext {
                     vc_join(),
                     vc_leave(),
                     vc_say(),
+                    vc_download(),
                     vc_config(),
                     vc_autoread(),
                     vc_dict(),

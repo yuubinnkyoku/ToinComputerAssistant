@@ -563,6 +563,84 @@ pub async fn vc_say(
     Ok(())
 }
 
+/// 現在の話者設定で音声ファイル（WAV）を生成して送信します
+#[poise::command(slash_command, prefix_command)]
+pub async fn vc_download(
+    ctx: Context<'_>,
+    #[description = "Text to synthesize and download as WAV"]
+    #[rest]
+    text: String,
+) -> Result<(), Error> {
+    let Some(guild_id) = ctx.guild_id() else {
+        send_vc_embed(
+            &ctx,
+            vc_error_embed("vc_download はサーバーチャンネル内でのみ使用できます。"),
+        )
+        .await?;
+        return Ok(());
+    };
+
+    if text.trim().is_empty() {
+        send_vc_embed(&ctx, vc_error_embed("生成するテキストが空です。")).await?;
+        return Ok(());
+    }
+
+    let channel_id = ctx.channel_id();
+    let ob_ctx = ctx.data();
+
+    let dictionary = ob_ctx.chat_contexts.voice_dictionary_entries(channel_id);
+    let text = apply_tts_dictionary(&text, &dictionary);
+    let preview = preview_text(&text, 120);
+
+    let user_voice = ob_ctx.user_contexts.get_or_create(ctx.author().id);
+    let speaker_id = user_voice
+        .voice_speaker
+        .unwrap_or_else(|| ob_ctx.voice_system.config(guild_id).speaker);
+
+    let wav = match ob_ctx
+        .voice_system
+        .synthesize_wav(
+            text,
+            speaker_id,
+            user_voice.voice_speed_scale,
+            user_voice.voice_pitch_scale,
+            user_voice.voice_pan,
+        )
+        .await
+    {
+        Ok(wav) => wav,
+        Err(e) => {
+            send_vc_embed(
+                &ctx,
+                vc_error_embed(format!("音声ファイル生成に失敗しました: {e}")),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    let speaker_name =
+        voice_catalog::speaker_name_for_id(speaker_id).unwrap_or_else(|| "(unknown)".to_string());
+    let style_name =
+        voice_catalog::style_name_for_id(speaker_id).unwrap_or_else(|| "(unknown)".to_string());
+
+    let attachment = CreateAttachment::bytes(wav, "nelfie_tts.wav");
+    let embed = CreateEmbed::new()
+        .title("VC音声ファイル生成")
+        .description("現在の設定でWAVファイルを生成しました。")
+        .field(
+            "speaker",
+            format!("{} / {} ({})", speaker_name, style_name, speaker_id),
+            false,
+        )
+        .field("text", preview, false);
+
+    ctx.send(CreateReply::default().embed(embed).attachment(attachment))
+        .await?;
+
+    Ok(())
+}
+
 /// VC関連設定（システム読み上げ / 自動読み上げ / 並列数）を更新します
 #[poise::command(slash_command, prefix_command)]
 pub async fn vc_config(
