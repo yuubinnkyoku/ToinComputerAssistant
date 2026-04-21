@@ -1,0 +1,85 @@
+use std::{collections::HashMap, sync::Arc};
+
+use tokio::sync::mpsc;
+
+use crate::{
+    app::{
+        config::{ModelResponseParams, Models},
+        context::NelfieContext,
+    },
+    llm::{
+        client::{LMContext, LMTool},
+        gemini::client::GeminiClient,
+    },
+};
+
+#[allow(clippy::too_many_arguments)]
+pub async fn generate_response_by_model(
+    ob_ctx: NelfieContext,
+    model: Models,
+    lm_context: &LMContext,
+    max_tokens: Option<u32>,
+    tools: Option<Arc<HashMap<String, Box<dyn LMTool>>>>,
+    state_mpsc: Option<mpsc::Sender<String>>,
+    delta_mpsc: Option<mpsc::Sender<String>>,
+) -> Result<LMContext, Box<dyn std::error::Error + Send + Sync>> {
+    match model {
+        Models::Gemini25Flash => {
+            let gemini = GeminiClient::new(ob_ctx.config.gemini.clone());
+            gemini
+                .generate_response_with_model(
+                    "gemini-2.5-flash",
+                    ob_ctx,
+                    lm_context,
+                    tools,
+                    state_mpsc,
+                    delta_mpsc,
+                )
+                .await
+        }
+        Models::Gemini25Pro => {
+            let gemini = GeminiClient::new(ob_ctx.config.gemini.clone());
+            gemini
+                .generate_response_with_model(
+                    "gemini-2.5-pro",
+                    ob_ctx,
+                    lm_context,
+                    tools,
+                    state_mpsc,
+                    delta_mpsc,
+                )
+                .await
+        }
+        Models::GeminiAuto => {
+            let gemini = GeminiClient::new(ob_ctx.config.gemini.clone());
+            gemini
+                .generate_response_with_fallback(
+                    &ob_ctx.config.gemini.auto_models,
+                    ob_ctx,
+                    lm_context,
+                    tools,
+                    state_mpsc,
+                    delta_mpsc,
+                )
+                .await
+        }
+        _ => {
+            let params = ModelResponseParams {
+                model: model.to_string(),
+                ..model.to_parameter()
+            };
+            ob_ctx
+                .lm_client
+                .generate_response(
+                    ob_ctx.clone(),
+                    lm_context,
+                    max_tokens,
+                    tools,
+                    state_mpsc,
+                    delta_mpsc,
+                    Some(params),
+                )
+                .await
+        }
+    }
+}

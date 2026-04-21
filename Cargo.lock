@@ -3216,6 +3216,7 @@ dependencies = [
  "anyhow",
  "async-openai",
  "async-trait",
+ "base64",
  "chrono",
  "chrono-tz",
  "dashmap 6.1.0",
