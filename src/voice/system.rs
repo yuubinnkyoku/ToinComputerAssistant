@@ -16,6 +16,8 @@ use tokio::{
     time::{Duration, sleep, timeout},
 };
 
+use crate::fork_ext::tts_preprocessor::TtsTextPreprocessor;
+
 use super::{
     core_runtime::CoreRuntime,
     text::{normalize_tts_text, split_tts_segments},
@@ -41,6 +43,7 @@ fn normalize_parallel_count(parallel_count: usize) -> usize {
 pub struct VoiceSystem {
     default_speaker: u32,
     core_config: VoiceCoreConfig,
+    tts_preprocessor: Arc<dyn TtsTextPreprocessor>,
     core_runtime: Arc<OnceCell<Arc<CoreRuntime>>>,
     core_warmup_started: Arc<AtomicBool>,
     songbird: Arc<RwLock<Option<Arc<Songbird>>>>,
@@ -52,10 +55,15 @@ pub struct VoiceSystem {
 }
 
 impl VoiceSystem {
-    pub fn new(default_speaker: u32, core_config: VoiceCoreConfig) -> Self {
+    pub fn new(
+        default_speaker: u32,
+        core_config: VoiceCoreConfig,
+        tts_preprocessor: Arc<dyn TtsTextPreprocessor>,
+    ) -> Self {
         Self {
             default_speaker,
             core_config,
+            tts_preprocessor,
             core_runtime: Arc::new(OnceCell::new()),
             core_warmup_started: Arc::new(AtomicBool::new(false)),
             songbird: Arc::new(RwLock::new(None)),
@@ -279,7 +287,9 @@ impl VoiceSystem {
             parallel_count,
         } = options;
 
-        let text = normalize_tts_text(&text.into());
+        let base_text = normalize_tts_text(&text.into());
+        // NOTE: fork 固有機能は preprocessor 側へ隔離し、upstream 側には glue のみ残す。
+        let text = self.tts_preprocessor.preprocess(&base_text);
         if text.is_empty() {
             return Ok(());
         }

@@ -49,6 +49,8 @@ VOICEVOX_VVM_DIR=voicevox_core/models/vvms
 # 実行時リンク(load-onnxruntime)では voicevox_onnxruntime を自動探索してロードします
 # 通常は未設定でOK。明示パス/ファイル名を指定したい場合のみ設定してください
 VOICEVOX_ONNXRUNTIME_FILENAME=
+FORK_EXT_ENABLED=false
+FORK_EXT_TEXT_PIPELINE_ENABLED=false
 ```
 
 3. 起動

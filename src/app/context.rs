@@ -28,6 +28,7 @@ use crate::{
     llm::client::{LMClient, LMTool},
     llm::tools,
     llm::user::UserContexts,
+    fork_ext::tts_preprocessor::build_tts_text_preprocessor,
     voice::{VoiceCoreConfig, VoiceSystem},
 };
 
@@ -88,6 +89,7 @@ pub struct DisabledContextWrapperInner {
 impl NelfieContext {
     pub async fn new() -> NelfieContext {
         let config = Config::new();
+        let tts_preprocessor = build_tts_text_preprocessor(&config.fork_ext);
         let voice_system = VoiceSystem::new(
             config.voicevox_default_speaker,
             VoiceCoreConfig {
@@ -99,6 +101,7 @@ impl NelfieContext {
                 vvm_dir: config.voicevox_vvm_dir.clone(),
                 onnxruntime_filename: config.voicevox_onnxruntime_filename.clone(),
             },
+            tts_preprocessor,
         );
 
         // ツールの定義
