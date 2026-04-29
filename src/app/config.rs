@@ -109,9 +109,23 @@ impl Config {
             .filter(|list| !list.is_empty())
             .unwrap_or_else(|| {
                 vec![
-                    "gemini-3.0-flash".to_string(),
-                    "gemini-3.0-pro".to_string(),
+                    // fallback order (best quality first)
                     "gemini-3.1-pro".to_string(),
+                    "gemini-3.0-pro".to_string(),
+                    "gemini-3.0-flash".to_string(),
+                    "gemini-2.5-pro".to_string(),
+                    "gemini-3.1-flash-lite".to_string(),
+                    "gemma-4-31b".to_string(),
+                    "gemma-4-26b-a4b".to_string(),
+                    "gemini-2.5-flash".to_string(),
+                    "gemini-2.5-flash-lite".to_string(),
+                    "gemma-4-e4b".to_string(),
+                    "gemini-2.0-flash-lite".to_string(),
+                    "gemma-4-e2b".to_string(),
+                    "gemma-3-27b-it".to_string(),
+                    "gemma-3-12b-it".to_string(),
+                    "gemma-3-4b-it".to_string(),
+                    "gemma-3-1b-it".to_string(),
                 ]
             });
         let gemini_enable_google_search = std::env::var("GEMINI_ENABLE_GOOGLE_SEARCH")
