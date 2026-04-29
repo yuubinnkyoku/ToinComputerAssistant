@@ -97,7 +97,7 @@ impl Config {
         let gemini_base_url = std::env::var("GEMINI_BASE_URL")
             .unwrap_or_else(|_| "https://generativelanguage.googleapis.com/v1beta".to_string());
         let gemini_default_model =
-            std::env::var("GEMINI_DEFAULT_MODEL").unwrap_or_else(|_| "gemini-2.5-flash".to_string());
+            std::env::var("GEMINI_DEFAULT_MODEL").unwrap_or_else(|_| "gemini-3.0-flash".to_string());
         let gemini_auto_models = std::env::var("GEMINI_AUTO_MODELS")
             .ok()
             .map(|v| {
@@ -109,8 +109,9 @@ impl Config {
             .filter(|list| !list.is_empty())
             .unwrap_or_else(|| {
                 vec![
-                    "gemini-2.5-flash".to_string(),
-                    "gemini-2.5-pro".to_string(),
+                    "gemini-3.0-flash".to_string(),
+                    "gemini-3.0-pro".to_string(),
+                    "gemini-3.1-pro".to_string(),
                 ]
             });
         let gemini_enable_google_search = std::env::var("GEMINI_ENABLE_GOOGLE_SEARCH")
@@ -178,8 +179,9 @@ pub enum Models {
     Gpt5dot4Nano,
     O4Mini,
     O3,
-    Gemini25Flash,
-    Gemini25Pro,
+    Gemini30Flash,
+    Gemini30Pro,
+    Gemini31Pro,
     GeminiAuto,
 }
 
@@ -190,8 +192,9 @@ impl From<Models> for String {
             Models::Gpt5dot4Nano => "gpt-5.4-nano".to_string(),
             Models::O4Mini => "o4-mini".to_string(),
             Models::O3 => "o3".to_string(),
-            Models::Gemini25Flash => "gemini-2.5-flash".to_string(),
-            Models::Gemini25Pro => "gemini-2.5-pro".to_string(),
+            Models::Gemini30Flash => "gemini-3.0-flash".to_string(),
+            Models::Gemini30Pro => "gemini-3.0-pro".to_string(),
+            Models::Gemini31Pro => "gemini-3.1-pro".to_string(),
             Models::GeminiAuto => "gemini-auto".to_string(),
         }
     }
@@ -211,8 +214,12 @@ impl From<String> for Models {
             "gpt-5.4-nano" => Models::Gpt5dot4Nano,
             "o4-mini" => Models::O4Mini,
             "o3" => Models::O3,
-            "gemini-2.5-flash" => Models::Gemini25Flash,
-            "gemini-2.5-pro" => Models::Gemini25Pro,
+            "gemini-3.0-flash" => Models::Gemini30Flash,
+            "gemini-3.0-pro" => Models::Gemini30Pro,
+            "gemini-3.1-pro" => Models::Gemini31Pro,
+            // backward compatible aliases for older persisted values
+            "gemini-2.5-flash" => Models::Gemini30Flash,
+            "gemini-2.5-pro" => Models::Gemini30Pro,
             "gemini-auto" => Models::GeminiAuto,
             _ => Models::default(),
         }
@@ -226,8 +233,9 @@ impl Models {
             Models::Gpt5dot4Nano,
             Models::O4Mini,
             Models::O3,
-            Models::Gemini25Flash,
-            Models::Gemini25Pro,
+            Models::Gemini30Flash,
+            Models::Gemini30Pro,
+            Models::Gemini31Pro,
             Models::GeminiAuto,
         ]
     }
@@ -238,8 +246,9 @@ impl Models {
             Models::Gpt5dot4Nano => 1,
             Models::O4Mini => 3,
             Models::O3 => 6,
-            Models::Gemini25Flash => 3,
-            Models::Gemini25Pro => 6,
+            Models::Gemini30Flash => 3,
+            Models::Gemini30Pro => 6,
+            Models::Gemini31Pro => 7,
             Models::GeminiAuto => 4,
         }
     }
@@ -250,8 +259,9 @@ impl Models {
             Models::Gpt5dot4Nano => "gpt-5.4-nano",
             Models::O4Mini => "o4-mini",
             Models::O3 => "o3",
-            Models::Gemini25Flash => "gpt-5.4-mini",
-            Models::Gemini25Pro => "gpt-5.4-mini",
+            Models::Gemini30Flash => "gpt-5.4-mini",
+            Models::Gemini30Pro => "gpt-5.4-mini",
+            Models::Gemini31Pro => "gpt-5.4-mini",
             Models::GeminiAuto => "gpt-5.4-mini",
         };
 
@@ -264,7 +274,7 @@ impl Models {
     pub fn is_gemini(&self) -> bool {
         matches!(
             self,
-            Models::Gemini25Flash | Models::Gemini25Pro | Models::GeminiAuto
+            Models::Gemini30Flash | Models::Gemini30Pro | Models::Gemini31Pro | Models::GeminiAuto
         )
     }
 }

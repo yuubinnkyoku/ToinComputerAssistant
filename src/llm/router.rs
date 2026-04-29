@@ -24,11 +24,11 @@ pub async fn generate_response_by_model(
     delta_mpsc: Option<mpsc::Sender<String>>,
 ) -> Result<LMContext, Box<dyn std::error::Error + Send + Sync>> {
     match model {
-        Models::Gemini25Flash => {
+        Models::Gemini30Flash => {
             let gemini = GeminiClient::new(ob_ctx.config.gemini.clone());
             gemini
                 .generate_response_with_model(
-                    "gemini-2.5-flash",
+                    "gemini-3.0-flash",
                     ob_ctx,
                     lm_context,
                     tools,
@@ -37,11 +37,24 @@ pub async fn generate_response_by_model(
                 )
                 .await
         }
-        Models::Gemini25Pro => {
+        Models::Gemini30Pro => {
             let gemini = GeminiClient::new(ob_ctx.config.gemini.clone());
             gemini
                 .generate_response_with_model(
-                    "gemini-2.5-pro",
+                    "gemini-3.0-pro",
+                    ob_ctx,
+                    lm_context,
+                    tools,
+                    state_mpsc,
+                    delta_mpsc,
+                )
+                .await
+        }
+        Models::Gemini31Pro => {
+            let gemini = GeminiClient::new(ob_ctx.config.gemini.clone());
+            gemini
+                .generate_response_with_model(
+                    "gemini-3.1-pro",
                     ob_ctx,
                     lm_context,
                     tools,

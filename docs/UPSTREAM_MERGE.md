@@ -6,7 +6,7 @@
 - 方針: 既存 `src/llm/client.rs` は温存し、fork 固有機能は `src/llm/gemini/` と `src/llm/router.rs` に隔離。
 - 既存挙動: デフォルトモデルは従来どおり OpenAI 系で、Gemini は明示的にモデル選択したときのみ使用。
 - 追加機能:
-  - Gemini backend (`gemini-2.5-flash`, `gemini-2.5-pro`)
+  - Gemini backend (`gemini-3.0-flash`, `gemini-3.0-pro`, `gemini-3.1-pro`)
   - `gemini-auto` フェイルオーバー（設定順に順次試行）
   - Gemini tool-calling ループ
   - 画像付き入力の Gemini 変換（URL→inline data）
