@@ -9,18 +9,18 @@ use crate::llm::{
     gemini::types::{Content, InlineData, Part},
 };
 
-pub async fn lm_context_to_contents(http: &Client, lm_context: &LMContext) -> Vec<Content> {
+pub struct GeminiMappedContext {
+    pub system_instruction: Option<Content>,
+    pub contents: Vec<Content>,
+}
+
+pub async fn lm_context_to_contents(http: &Client, lm_context: &LMContext) -> GeminiMappedContext {
     let mut out = Vec::new();
+    let mut system_parts = Vec::new();
 
     for item in &lm_context.buf {
         match item {
             InputItem::EasyMessage(msg) => {
-                let role = match msg.role {
-                    Role::Assistant => "model",
-                    _ => "user",
-                }
-                .to_string();
-
                 let mut parts = Vec::new();
                 match &msg.content {
                     EasyInputContent::Text(text) => {
@@ -39,20 +39,34 @@ pub async fn lm_context_to_contents(http: &Client, lm_context: &LMContext) -> Ve
                 }
 
                 if !parts.is_empty() {
-                    out.push(Content { role, parts });
+                    if matches!(msg.role, Role::System | Role::Developer) {
+                        system_parts.extend(parts);
+                    } else {
+                        let role = if matches!(msg.role, Role::Assistant) {
+                            "model"
+                        } else {
+                            "user"
+                        }
+                        .to_string();
+                        out.push(Content { role, parts });
+                    }
                 }
             }
             InputItem::Item(Item::Message(message_item)) => {
                 if let MessageItem::Input(input) = message_item {
-                    let role = match input.role {
-                        InputRole::Assistant => "model",
-                        _ => "user",
-                    }
-                    .to_string();
-
                     let parts = convert_input_contents(http, &input.content).await;
                     if !parts.is_empty() {
-                        out.push(Content { role, parts });
+                        if matches!(input.role, InputRole::System | InputRole::Developer) {
+                            system_parts.extend(parts);
+                        } else {
+                            let role = if matches!(input.role, InputRole::Assistant) {
+                                "model"
+                            } else {
+                                "user"
+                            }
+                            .to_string();
+                            out.push(Content { role, parts });
+                        }
                     }
                 }
             }
@@ -60,7 +74,19 @@ pub async fn lm_context_to_contents(http: &Client, lm_context: &LMContext) -> Ve
         }
     }
 
-    out
+    let system_instruction = if system_parts.is_empty() {
+        None
+    } else {
+        Some(Content {
+            role: "user".to_string(),
+            parts: system_parts,
+        })
+    };
+
+    GeminiMappedContext {
+        system_instruction,
+        contents: out,
+    }
 }
 
 async fn convert_input_contents(http: &Client, contents: &[InputContent]) -> Vec<Part> {

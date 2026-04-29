@@ -273,10 +273,10 @@ impl Models {
             Models::Gpt5dot4Nano => "gpt-5.4-nano",
             Models::O4Mini => "o4-mini",
             Models::O3 => "o3",
-            Models::Gemini30Flash => "gpt-5.4-mini",
-            Models::Gemini30Pro => "gpt-5.4-mini",
-            Models::Gemini31Pro => "gpt-5.4-mini",
-            Models::GeminiAuto => "gpt-5.4-mini",
+            Models::Gemini30Flash => "gemini-3.0-flash",
+            Models::Gemini30Pro => "gemini-3.0-pro",
+            Models::Gemini31Pro => "gemini-3.1-pro",
+            Models::GeminiAuto => "gemini-auto",
         };
 
         ModelResponseParams {

@@ -12,7 +12,10 @@ use crate::{
         client::{LMContext, LMTool, Role},
         gemini::{
             mapper::lm_context_to_contents,
-            types::{Content, FunctionDeclaration, GenerateContentRequest, GenerateContentResponse, GoogleSearch, Tool},
+            types::{
+                Content, FunctionDeclaration, FunctionResponse, GenerateContentRequest,
+                GenerateContentResponse, GenerationConfig, GoogleSearch, Part, Tool,
+            },
         },
     },
 };
@@ -37,6 +40,7 @@ impl GeminiClient {
         model: &str,
         ob_ctx: NelfieContext,
         lm_context: &LMContext,
+        max_tokens: Option<u32>,
         tools: Option<Arc<HashMap<String, Box<dyn LMTool>>>>,
         state_mpsc: Option<mpsc::Sender<String>>,
         delta_mpsc: Option<mpsc::Sender<String>>,
@@ -62,11 +66,20 @@ impl GeminiClient {
             }
         };
 
+        let mut pending_function_responses: Vec<Content> = Vec::new();
+
         for i in 0..self.config.max_tool_loops {
             let mut current_lm = lm_context.clone();
             current_lm.extend(&delta_context);
-            let contents = lm_context_to_contents(&self.http, &current_lm).await;
-            let request = self.build_request(contents, &tools_map);
+            let mapped = lm_context_to_contents(&self.http, &current_lm).await;
+            let mut contents = mapped.contents;
+            contents.extend(pending_function_responses.clone());
+            let request = self.build_request(
+                mapped.system_instruction,
+                contents,
+                max_tokens,
+                &tools_map,
+            );
 
             state_send(format!("Gemini generating... (loop {})", i + 1));
             let response = self
@@ -96,6 +109,7 @@ impl GeminiClient {
             };
 
             let mut has_function_call = false;
+            let mut next_function_responses = Vec::new();
             for part in &content.parts {
                 if let Some(text) = &part.text
                     && !text.is_empty()
@@ -117,10 +131,18 @@ impl GeminiClient {
                         format!("Error: tool '{}' is not defined", function_call.name)
                     };
 
-                    delta_context.add_text(
-                        format!("Tool '{}' result: {}", function_call.name, output_text),
-                        Role::User,
-                    );
+                    next_function_responses.push(Content {
+                        role: "user".to_string(),
+                        parts: vec![Part {
+                            text: None,
+                            inline_data: None,
+                            function_call: None,
+                            function_response: Some(FunctionResponse {
+                                name: function_call.name.clone(),
+                                response: serde_json::json!({ "output": output_text }),
+                            }),
+                        }],
+                    });
                 }
             }
 
@@ -128,6 +150,8 @@ impl GeminiClient {
                 info!("Gemini response completed without pending tool calls");
                 break;
             }
+
+            pending_function_responses = next_function_responses;
         }
 
         Ok(delta_context)
@@ -138,6 +162,7 @@ impl GeminiClient {
         models: &[String],
         ob_ctx: NelfieContext,
         lm_context: &LMContext,
+        max_tokens: Option<u32>,
         tools: Option<Arc<HashMap<String, Box<dyn LMTool>>>>,
         state_mpsc: Option<mpsc::Sender<String>>,
         delta_mpsc: Option<mpsc::Sender<String>>,
@@ -155,6 +180,7 @@ impl GeminiClient {
                     model,
                     ob_ctx.clone(),
                     lm_context,
+                    max_tokens,
                     tools.clone(),
                     state_mpsc.clone(),
                     delta_mpsc.clone(),
@@ -177,7 +203,9 @@ impl GeminiClient {
 
     fn build_request(
         &self,
+        system_instruction: Option<Content>,
         contents: Vec<Content>,
+        max_tokens: Option<u32>,
         tools: &HashMap<String, Box<dyn LMTool>>,
     ) -> GenerateContentRequest {
         let mut tool_defs = Vec::new();
@@ -206,12 +234,16 @@ impl GeminiClient {
         }
 
         GenerateContentRequest {
+            system_instruction,
             contents,
             tools: if tool_defs.is_empty() {
                 None
             } else {
                 Some(tool_defs)
             },
+            generation_config: Some(GenerationConfig {
+                max_output_tokens: max_tokens,
+            }),
         }
     }
 
