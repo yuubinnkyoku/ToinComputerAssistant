@@ -78,7 +78,7 @@ pub async fn lm_context_to_contents(http: &Client, lm_context: &LMContext) -> Ge
         None
     } else {
         Some(Content {
-            role: "user".to_string(),
+            role: "system".to_string(),
             parts: system_parts,
         })
     };

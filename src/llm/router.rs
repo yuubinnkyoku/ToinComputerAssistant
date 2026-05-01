@@ -68,9 +68,14 @@ pub async fn generate_response_by_model(
         }
         Models::GeminiAuto => {
             let gemini = GeminiClient::new(ob_ctx.config.gemini.clone());
+            let auto_models = if ob_ctx.config.gemini.auto_models.is_empty() {
+                vec![ob_ctx.config.gemini.default_model.clone()]
+            } else {
+                ob_ctx.config.gemini.auto_models.clone()
+            };
             gemini
                 .generate_response_with_fallback(
-                    &ob_ctx.config.gemini.auto_models,
+                    &auto_models,
                     ob_ctx,
                     lm_context,
                     max_tokens,
