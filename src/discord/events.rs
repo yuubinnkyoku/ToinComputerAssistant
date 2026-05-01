@@ -13,9 +13,12 @@ use serenity::all::{
 use tokio::{sync::mpsc, time::sleep};
 
 use crate::{
-    discord::commands::log_err,
     app::context::NelfieContext,
-    llm::client::{LMContext, Role},
+    discord::commands::log_err,
+    llm::{
+        client::{LMContext, Role},
+        router::generate_response_by_model,
+    },
     voice::{SpeakOptions, apply_tts_dictionary, build_tts_text_from_message},
 };
 
@@ -641,14 +644,14 @@ async fn run_response_task(
     let timeout_duration = Duration::from_millis(ob_context.config.timeout_millis);
     let result = match tokio::time::timeout(
         timeout_duration,
-        ob_context.lm_client.generate_response(
+        generate_response_by_model(
             ob_context.clone(),
+            model.clone(),
             &context,
             Some(2000),
             Some(tools),
             Some(state_tx),
             Some(delta_tx),
-            Some(model.to_parameter()),
         ),
     )
     .await

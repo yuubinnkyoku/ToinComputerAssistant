@@ -25,6 +25,17 @@ pub struct Config {
     pub voicevox_open_jtalk_dict_dir: String,
     pub voicevox_vvm_dir: String,
     pub voicevox_onnxruntime_filename: String,
+    pub gemini: GeminiConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeminiConfig {
+    pub api_key: Option<String>,
+    pub base_url: String,
+    pub default_model: String,
+    pub auto_models: Vec<String>,
+    pub enable_google_search: bool,
+    pub max_tool_loops: usize,
 }
 
 impl Config {
@@ -82,6 +93,53 @@ impl Config {
             .unwrap_or_else(|_| "voicevox_core/models/vvms".to_string());
         let voicevox_onnxruntime_filename =
             std::env::var("VOICEVOX_ONNXRUNTIME_FILENAME").unwrap_or_else(|_| "".to_string());
+        let gemini_api_key = std::env::var("GEMINI_API_KEY").ok();
+        let gemini_base_url = std::env::var("GEMINI_BASE_URL")
+            .unwrap_or_else(|_| "https://generativelanguage.googleapis.com/v1beta".to_string());
+        let gemini_default_model =
+            std::env::var("GEMINI_DEFAULT_MODEL").unwrap_or_else(|_| "gemini-3.0-flash".to_string());
+        let gemini_auto_models = std::env::var("GEMINI_AUTO_MODELS")
+            .ok()
+            .map(|v| {
+                v.split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|list| !list.is_empty())
+            .unwrap_or_else(|| {
+                vec![
+                    // fallback order (best quality first)
+                    "gemini-3.1-pro".to_string(),
+                    "gemini-3.0-pro".to_string(),
+                    "gemini-3.0-flash".to_string(),
+                    "gemini-2.5-pro".to_string(),
+                    "gemini-3.1-flash-lite".to_string(),
+                    "gemma-4-31b".to_string(),
+                    "gemma-4-26b-a4b".to_string(),
+                    "gemini-2.5-flash".to_string(),
+                    "gemini-2.5-flash-lite".to_string(),
+                    "gemma-4-e4b".to_string(),
+                    "gemini-2.0-flash-lite".to_string(),
+                    "gemma-4-e2b".to_string(),
+                    "gemma-3-27b-it".to_string(),
+                    "gemma-3-12b-it".to_string(),
+                    "gemma-3-4b-it".to_string(),
+                    "gemma-3-1b-it".to_string(),
+                ]
+            });
+        let gemini_enable_google_search = std::env::var("GEMINI_ENABLE_GOOGLE_SEARCH")
+            .ok()
+            .map(|v| {
+                let normalized = v.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false);
+        let gemini_max_tool_loops = std::env::var("GEMINI_MAX_TOOL_LOOPS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .map(|v| v.clamp(1, 20))
+            .unwrap_or(10);
 
         Config {
             discord_token,
@@ -103,6 +161,14 @@ impl Config {
             voicevox_open_jtalk_dict_dir,
             voicevox_vvm_dir,
             voicevox_onnxruntime_filename,
+            gemini: GeminiConfig {
+                api_key: gemini_api_key,
+                base_url: gemini_base_url,
+                default_model: gemini_default_model,
+                auto_models: gemini_auto_models,
+                enable_google_search: gemini_enable_google_search,
+                max_tool_loops: gemini_max_tool_loops,
+            },
         }
     }
 }
@@ -127,6 +193,10 @@ pub enum Models {
     Gpt5dot4Nano,
     O4Mini,
     O3,
+    Gemini30Flash,
+    Gemini30Pro,
+    Gemini31Pro,
+    GeminiAuto,
 }
 
 impl From<Models> for String {
@@ -136,6 +206,10 @@ impl From<Models> for String {
             Models::Gpt5dot4Nano => "gpt-5.4-nano".to_string(),
             Models::O4Mini => "o4-mini".to_string(),
             Models::O3 => "o3".to_string(),
+            Models::Gemini30Flash => "gemini-3.0-flash".to_string(),
+            Models::Gemini30Pro => "gemini-3.0-pro".to_string(),
+            Models::Gemini31Pro => "gemini-3.1-pro".to_string(),
+            Models::GeminiAuto => "gemini-auto".to_string(),
         }
     }
 }
@@ -154,6 +228,13 @@ impl From<String> for Models {
             "gpt-5.4-nano" => Models::Gpt5dot4Nano,
             "o4-mini" => Models::O4Mini,
             "o3" => Models::O3,
+            "gemini-3.0-flash" => Models::Gemini30Flash,
+            "gemini-3.0-pro" => Models::Gemini30Pro,
+            "gemini-3.1-pro" => Models::Gemini31Pro,
+            // backward compatible aliases for older persisted values
+            "gemini-2.5-flash" => Models::Gemini30Flash,
+            "gemini-2.5-pro" => Models::Gemini30Pro,
+            "gemini-auto" => Models::GeminiAuto,
             _ => Models::default(),
         }
     }
@@ -166,6 +247,10 @@ impl Models {
             Models::Gpt5dot4Nano,
             Models::O4Mini,
             Models::O3,
+            Models::Gemini30Flash,
+            Models::Gemini30Pro,
+            Models::Gemini31Pro,
+            Models::GeminiAuto,
         ]
     }
 
@@ -175,6 +260,10 @@ impl Models {
             Models::Gpt5dot4Nano => 1,
             Models::O4Mini => 3,
             Models::O3 => 6,
+            Models::Gemini30Flash => 3,
+            Models::Gemini30Pro => 6,
+            Models::Gemini31Pro => 7,
+            Models::GeminiAuto => 4,
         }
     }
 
@@ -184,11 +273,22 @@ impl Models {
             Models::Gpt5dot4Nano => "gpt-5.4-nano",
             Models::O4Mini => "o4-mini",
             Models::O3 => "o3",
+            Models::Gemini30Flash => "gemini-3.0-flash",
+            Models::Gemini30Pro => "gemini-3.0-pro",
+            Models::Gemini31Pro => "gemini-3.1-pro",
+            Models::GeminiAuto => "gemini-auto",
         };
 
         ModelResponseParams {
             model: model.to_string(),
             reasoning_effort: ReasoningEffort::Low,
         }
+    }
+
+    pub fn is_gemini(&self) -> bool {
+        matches!(
+            self,
+            Models::Gemini30Flash | Models::Gemini30Pro | Models::Gemini31Pro | Models::GeminiAuto
+        )
     }
 }
