@@ -15,13 +15,13 @@
 ## 2026-05-05: NVIDIA NIM backend extension
 
 - 目的: upstream の OpenAI 実装を壊さずに、OpenAI互換APIを公開する NVIDIA NIM を opt-in で利用可能にする。
-- 方針: NIM 固有のクライアント生成は `src/llm/nim/` に隔離し、既存 `src/llm/client.rs` には provider 能力フラグだけを追加。
+- 方針: NIM 固有の Chat Completions adapter は `src/llm/nim/` に隔離し、既存 `src/llm/client.rs` は変更しない。
 - 既存挙動: デフォルトモデルと OpenAI 経路は従来どおり。NIM は `/model set nim-default` を選んだときのみ使用。
 - 追加設定:
   - `NIM_BASE_URL` (NIM 使用時は必須。NVIDIA hosted API 例: `https://integrate.api.nvidia.com/v1`)
   - `NIM_API_KEY` (NIM 使用時は必須)
   - `NIM_DEFAULT_MODEL` (既定: `nvidia/llama-3.1-nemotron-nano-8b-v1`)
-- 注意: NIM 経路では OpenAI built-in web search と Responses API の `reasoning` field を送らない。NIM deployment 間の互換性を優先するため。
+- 注意: NVIDIA hosted API は `POST /v1/chat/completions` を使う。NIM 経路では OpenAI built-in web search と Responses API の `reasoning` field を送らない。
 
 ## Conflict-prone files
 

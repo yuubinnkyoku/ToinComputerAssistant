@@ -29,31 +29,13 @@ pub use async_openai::types::responses::Role;
 
 pub struct LMClient {
     pub client: Client<OpenAIConfig>,
-    pub enable_builtin_web_search: bool,
-    pub enable_reasoning: bool,
 }
 
 /// LMのクライアント
 /// レスポンス投げて返すための抽象レイヤ
 impl LMClient {
     pub fn new(client: Client<OpenAIConfig>) -> Self {
-        Self {
-            client,
-            enable_builtin_web_search: true,
-            enable_reasoning: true,
-        }
-    }
-
-    pub fn new_with_options(
-        client: Client<OpenAIConfig>,
-        enable_builtin_web_search: bool,
-        enable_reasoning: bool,
-    ) -> Self {
-        Self {
-            client,
-            enable_builtin_web_search,
-            enable_reasoning,
-        }
+        Self { client }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -87,10 +69,8 @@ impl LMClient {
             .map(|tool| tool.define())
             .collect::<Vec<Tool>>();
 
-        if self.enable_builtin_web_search {
-            // OpenAI built-in browser tool
-            tool_defs.push(Tool::WebSearch(WebSearchTool::default()));
-        }
+        // OpenAI built-in browser tool
+        tool_defs.push(Tool::WebSearch(WebSearchTool::default()));
 
         let request_parameters = parameters.unwrap_or_else(|| Models::default().to_parameter());
 
@@ -102,23 +82,18 @@ impl LMClient {
             let context = lm_context.generate_context_with(&delta_context);
             debug!("Iteration {}: Generated context", i);
 
-            let mut request_builder = CreateResponseArgs::default();
-            request_builder
+            let request = CreateResponseArgs::default()
                 .model(request_parameters.model.clone())
                 .input(context)
                 .max_output_tokens(max_tokens.unwrap_or(100))
                 .parallel_tool_calls(true)
                 .tools(tool_defs.clone())
-                .tool_choice(tool_choice.clone());
-
-            if self.enable_reasoning {
-                request_builder.reasoning(Reasoning {
+                .tool_choice(tool_choice.clone())
+                .reasoning(Reasoning {
                     effort: Some(request_parameters.reasoning_effort.clone()),
                     summary: None,
-                });
-            }
-
-            let request = request_builder.build()?;
+                })
+                .build()?;
 
             let mut stream = self.client.responses().create_stream(request).await?;
 

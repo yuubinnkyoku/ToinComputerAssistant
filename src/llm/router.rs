@@ -87,21 +87,17 @@ pub async fn generate_response_by_model(
                 .await
         }
         Models::NimDefault => {
-            let nim_client = nim::client::build_lm_client(&ob_ctx.config.nim)
-                .map_err(std::io::Error::other)?;
-            let params = ModelResponseParams {
-                model: ob_ctx.config.nim.default_model.clone(),
-                ..model.to_parameter()
-            };
+            let nim_client = nim::client::NimClient::new(ob_ctx.config.nim.clone());
+            let nim_model = ob_ctx.config.nim.default_model.clone();
             nim_client
-                .generate_response(
-                    ob_ctx.clone(),
+                .generate_response_with_model(
+                    &nim_model,
+                    ob_ctx,
                     lm_context,
                     max_tokens,
                     tools,
                     state_mpsc,
                     delta_mpsc,
-                    Some(params),
                 )
                 .await
         }
