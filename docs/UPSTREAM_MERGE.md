@@ -11,6 +11,7 @@
   - Gemini tool-calling ループ
   - 画像付き入力の Gemini 変換（URL→inline data）
   - Gemini `google_search` tool の opt-in
+- 注意: 既存 tool の JSON Schema は OpenAI 側と共有のまま維持し、Gemini に送る直前だけ `src/llm/gemini/schema.rs` で Gemini FunctionDeclaration 用の subset に正規化する。
 
 ## 2026-05-05: NVIDIA NIM backend extension
 
@@ -23,8 +24,14 @@
   - `NIM_DEFAULT_MODEL` (既定: `nvidia/llama-3.1-nemotron-nano-8b-v1`)
 - 注意: NVIDIA hosted API は `POST /v1/chat/completions` を使う。NIM 経路では OpenAI built-in web search と Responses API の `reasoning` field を送らない。
 
+## 2026-05-06: Windows MSVC dev build profile
+
+- 目的: VOICEVOX 依存を含む Windows/MSVC の debug build で linker が PDB 上限 (`LNK1318`) に当たるのを避ける。
+- 方針: `cargo run` が使う dev profile の debug info だけを無効化する。release profile と runtime 挙動は変更しない。
+
 ## Conflict-prone files
 
+- `Cargo.toml`（Windows/MSVC dev build の debug info 抑制）
 - `src/app/config.rs`（モデル列挙・環境変数）
 - `src/discord/events.rs`（推論呼び出し箇所）
 

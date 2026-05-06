@@ -56,6 +56,10 @@ once_cell = "1.21.4"
 kanalizer = { git = "https://github.com/VOICEVOX/kanalizer.git", package = "kanalizer" }
 base64 = "0.22.1"
 
+[profile.dev]
+# MSVC debug builds of the VOICEVOX-heavy binary can hit PDB limits during `cargo run`.
+debug = 0
+
 [profile.release]
 opt-level = 3
 lto = "fat"

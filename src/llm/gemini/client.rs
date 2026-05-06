@@ -11,6 +11,7 @@ use crate::{
         client::{LMContext, LMTool, Role},
         gemini::{
             mapper::lm_context_to_contents,
+            schema::to_gemini_schema,
             types::{
                 Content, FunctionDeclaration, FunctionResponse, GenerateContentRequest,
                 GenerateContentResponse, GenerationConfig, GoogleSearch, Part, Tool,
@@ -213,7 +214,7 @@ impl GeminiClient {
             .map(|tool| FunctionDeclaration {
                 name: tool.name(),
                 description: tool.description(),
-                parameters: tool.json_schema(),
+                parameters: to_gemini_schema(tool.json_schema()),
             })
             .collect::<Vec<_>>();
 
