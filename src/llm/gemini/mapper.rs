@@ -59,12 +59,7 @@ pub async fn lm_context_to_contents(http: &Client, lm_context: &LMContext) -> Ge
                         if matches!(input.role, InputRole::System | InputRole::Developer) {
                             system_parts.extend(parts);
                         } else {
-                            let role = if matches!(input.role, InputRole::Assistant) {
-                                "model"
-                            } else {
-                                "user"
-                            }
-                            .to_string();
+                            let role = "user".to_string();
                             out.push(Content { role, parts });
                         }
                     }

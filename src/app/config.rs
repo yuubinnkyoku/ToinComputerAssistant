@@ -26,6 +26,7 @@ pub struct Config {
     pub voicevox_vvm_dir: String,
     pub voicevox_onnxruntime_filename: String,
     pub gemini: GeminiConfig,
+    pub nim: NimConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +37,13 @@ pub struct GeminiConfig {
     pub auto_models: Vec<String>,
     pub enable_google_search: bool,
     pub max_tool_loops: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct NimConfig {
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+    pub default_model: String,
 }
 
 impl Config {
@@ -140,6 +148,10 @@ impl Config {
             .and_then(|v| v.parse::<usize>().ok())
             .map(|v| v.clamp(1, 20))
             .unwrap_or(10);
+        let nim_api_key = std::env::var("NIM_API_KEY").ok();
+        let nim_base_url = std::env::var("NIM_BASE_URL").ok();
+        let nim_default_model = std::env::var("NIM_DEFAULT_MODEL")
+            .unwrap_or_else(|_| "nvidia/llama-3.1-nemotron-nano-8b-v1".to_string());
 
         Config {
             discord_token,
@@ -169,6 +181,11 @@ impl Config {
                 enable_google_search: gemini_enable_google_search,
                 max_tool_loops: gemini_max_tool_loops,
             },
+            nim: NimConfig {
+                api_key: nim_api_key,
+                base_url: nim_base_url,
+                default_model: nim_default_model,
+            },
         }
     }
 }
@@ -197,6 +214,7 @@ pub enum Models {
     Gemini30Pro,
     Gemini31Pro,
     GeminiAuto,
+    NimDefault,
 }
 
 impl From<Models> for String {
@@ -210,6 +228,7 @@ impl From<Models> for String {
             Models::Gemini30Pro => "gemini-3.0-pro".to_string(),
             Models::Gemini31Pro => "gemini-3.1-pro".to_string(),
             Models::GeminiAuto => "gemini-auto".to_string(),
+            Models::NimDefault => "nim-default".to_string(),
         }
     }
 }
@@ -235,6 +254,7 @@ impl From<String> for Models {
             "gemini-2.5-flash" => Models::Gemini30Flash,
             "gemini-2.5-pro" => Models::Gemini30Pro,
             "gemini-auto" => Models::GeminiAuto,
+            "nim-default" => Models::NimDefault,
             _ => Models::default(),
         }
     }
@@ -251,6 +271,7 @@ impl Models {
             Models::Gemini30Pro,
             Models::Gemini31Pro,
             Models::GeminiAuto,
+            Models::NimDefault,
         ]
     }
 
@@ -264,6 +285,7 @@ impl Models {
             Models::Gemini30Pro => 6,
             Models::Gemini31Pro => 7,
             Models::GeminiAuto => 4,
+            Models::NimDefault => 3,
         }
     }
 
@@ -277,6 +299,7 @@ impl Models {
             Models::Gemini30Pro => "gemini-3.0-pro",
             Models::Gemini31Pro => "gemini-3.1-pro",
             Models::GeminiAuto => "gemini-auto",
+            Models::NimDefault => "nim-default",
         };
 
         ModelResponseParams {

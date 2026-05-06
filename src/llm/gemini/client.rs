@@ -1,8 +1,7 @@
 use std::{collections::HashMap, io, sync::Arc};
 
-use anyhow::anyhow;
 use log::{debug, info, warn};
-use reqwest::Client as HttpClient;
+use reqwest::{Client as HttpClient, Url};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -49,7 +48,7 @@ impl GeminiClient {
             .config
             .api_key
             .clone()
-            .ok_or_else(|| anyhow!("GEMINI_API_KEY is not set"))?;
+            .ok_or_else(|| io::Error::other("GEMINI_API_KEY is not set"))?;
 
         let tools_map = tools.unwrap_or_default();
         let mut delta_context = LMContext::new();
@@ -84,8 +83,7 @@ impl GeminiClient {
             state_send(format!("Gemini generating... (loop {})", i + 1));
             let response = self
                 .call_generate_content(model, &api_key, &request)
-                .await
-                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+                .await?;
 
             let Some(candidate) = response.candidates.first() else {
                 let block_reason = response
@@ -252,14 +250,14 @@ impl GeminiClient {
         model: &str,
         api_key: &str,
         request: &GenerateContentRequest,
-    ) -> Result<GenerateContentResponse, anyhow::Error> {
+    ) -> Result<GenerateContentResponse, Box<dyn std::error::Error + Send + Sync>> {
         let base = self.config.base_url.trim_end_matches('/');
-        let url = format!("{}/models/{}:generateContent", base, model);
+        let mut url = Url::parse(&format!("{}/models/{}:generateContent", base, model))?;
+        url.query_pairs_mut().append_pair("key", api_key);
 
         let response = self
             .http
             .post(url)
-            .query(&[("key", api_key)])
             .json(request)
             .send()
             .await?;
@@ -267,7 +265,10 @@ impl GeminiClient {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Gemini API error {}: {}", status, body));
+            return Err(Box::new(io::Error::other(format!(
+                "Gemini API error {}: {}",
+                status, body
+            ))));
         }
 
         Ok(response.json::<GenerateContentResponse>().await?)
