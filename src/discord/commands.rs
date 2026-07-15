@@ -1,4 +1,4 @@
-use crate::voice::{SpeakOptions, apply_tts_dictionary, voice_catalog};
+use crate::voice::{SpeakOptions, apply_tts_dictionaries, voice_catalog};
 use std::time::Instant;
 
 use log::{error, info, warn};
@@ -16,6 +16,7 @@ use crate::{
         VOICE_DICTIONARY_MAX_ENTRIES, VOICE_PARALLEL_COUNT_DEFAULT, VOICE_PARALLEL_COUNT_MAX,
     },
     llm::tools::latex::LatexExprRenderTool,
+    llm::user::UserContextScope,
 };
 
 // エラー型 dyn
@@ -101,6 +102,8 @@ pub async fn rate_config(
     }
 
     let target_user_id: UserId = target_user.id;
+    let bot_user_id = ctx.serenity_context().cache.current_user().id;
+    let target_scope = UserContextScope::for_actor(target_user_id, ctx.guild_id(), bot_user_id);
 
     let new_rate_line: u64 = if limit.eq_ignore_ascii_case("unlimit") {
         0
@@ -117,31 +120,43 @@ pub async fn rate_config(
                 return Ok(());
             }
         };
-        ob_ctx.user_contexts.get_or_create(target_user_id).rate_line
+        ob_ctx
+            .user_contexts
+            .get_or_create_scoped(target_scope)
+            .rate_line
             + cost * ob_ctx.config.rate_limit_sec_per_cost
     };
 
     ob_ctx
         .user_contexts
-        .set_rate_line(target_user_id, new_rate_line);
+        .set_rate_line_scoped(target_scope, new_rate_line);
+
+    let scope_label = match target_scope {
+        UserContextScope::User(_) => "user".to_string(),
+        UserContextScope::GuildBot { guild_id, .. } => {
+            format!("guild bot scope `{}`", guild_id.get())
+        }
+    };
 
     let reply = if new_rate_line == 0 {
         format!(
-            "info: ユーザー `{}` のレート制限を **unlimit** に設定しました。",
-            target_user_id
-                .to_user(ctx.http())
-                .await
-                .map(|u| u.display_name().to_string())
-                .unwrap_or_else(|_| "Null".to_string())
-        )
-    } else {
-        format!(
-            "info: ユーザー `{}` の rate_line を **{}** に設定しました。",
+            "info: ユーザー `{}` ({}) のレート制限を **unlimit** に設定しました。",
             target_user_id
                 .to_user(ctx.http())
                 .await
                 .map(|u| u.display_name().to_string())
                 .unwrap_or_else(|_| "Null".to_string()),
+            scope_label
+        )
+    } else {
+        format!(
+            "info: ユーザー `{}` ({}) の rate_line を **{}** に設定しました。",
+            target_user_id
+                .to_user(ctx.http())
+                .await
+                .map(|u| u.display_name().to_string())
+                .unwrap_or_else(|_| "Null".to_string()),
+            scope_label,
             new_rate_line
         )
     };
@@ -169,6 +184,171 @@ async fn autocomplete_rate_limit(_ctx: Context<'_>, partial: &str) -> Vec<String
     out.dedup();
     out.truncate(20);
     out
+}
+
+/// Register a scheduled LLM prompt in this channel.
+#[poise::command(slash_command, prefix_command)]
+pub async fn cron(
+    ctx: Context<'_>,
+    #[description = "Cron expression, for example: */30 * * * *"] schedule: String,
+    #[description = "Prompt to send automatically"]
+    #[rest]
+    prompt: String,
+) -> Result<(), Error> {
+    let Some(guild_id) = ctx.guild_id() else {
+        ctx.say("エラー: cron はサーバーチャンネル内でのみ登録できます。")
+            .await?;
+        return Ok(());
+    };
+
+    let ob_ctx = ctx.data();
+    let job = match ob_ctx.cron_scheduler.register(
+        guild_id,
+        ctx.channel_id(),
+        ctx.author().id,
+        schedule,
+        prompt,
+    ) {
+        Ok(job) => job,
+        Err(e) => {
+            ctx.say(format!("エラー: cron 登録に失敗しました: {e}"))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let embed = CreateEmbed::new()
+        .title("cron登録")
+        .description("定期実行プロンプトを登録しました。")
+        .field("id", format!("`{}`", job.id), false)
+        .field("channel", format!("<#{}>", job.channel_id), true)
+        .field("schedule", format!("`{}`", job.schedule), true)
+        .field(
+            "next_run",
+            format!("<t:{}:F> / <t:{}:R>", job.next_run_at, job.next_run_at),
+            false,
+        )
+        .field("prompt", preview_text(&job.prompt, 240), false);
+
+    ctx.send(CreateReply::default().embed(embed)).await?;
+    Ok(())
+}
+
+/// Run an already registered cron job immediately.
+#[poise::command(slash_command, prefix_command)]
+pub async fn cron_test(
+    ctx: Context<'_>,
+    #[description = "Cron ID. If omitted, runs the only cron registered in this channel."]
+    #[autocomplete = "autocomplete_cron_id"]
+    id: Option<String>,
+) -> Result<(), Error> {
+    let Some(guild_id) = ctx.guild_id() else {
+        ctx.say("エラー: cron_test はサーバーチャンネル内でのみ使用できます。")
+            .await?;
+        return Ok(());
+    };
+
+    let ob_ctx = ctx.data();
+    let job = if let Some(id) = id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+        let Some(job) = ob_ctx.cron_scheduler.get_job(id) else {
+            ctx.say(format!("エラー: cron `{id}` は登録されていません。"))
+                .await?;
+            return Ok(());
+        };
+
+        if job.guild_id != guild_id.get() {
+            ctx.say(format!(
+                "エラー: cron `{id}` はこのサーバーの登録ではありません。"
+            ))
+            .await?;
+            return Ok(());
+        }
+
+        job
+    } else {
+        let jobs = ob_ctx
+            .cron_scheduler
+            .jobs_for_channel(guild_id, ctx.channel_id());
+        match jobs.len() {
+            0 => {
+                ctx.say("エラー: このチャンネルには登録済み cron がありません。")
+                    .await?;
+                return Ok(());
+            }
+            1 => jobs[0].clone(),
+            _ => {
+                let list = jobs
+                    .iter()
+                    .take(10)
+                    .map(|job| {
+                        format!(
+                            "- `{}` `{}` {}",
+                            job.id,
+                            job.schedule,
+                            preview_text(&job.prompt, 80)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ctx.say(format!(
+                    "エラー: このチャンネルには複数の cron があります。id を指定してください。\n{}",
+                    list
+                ))
+                .await?;
+                return Ok(());
+            }
+        }
+    };
+
+    ob_ctx.cron_scheduler.dispatch_job(
+        ctx.serenity_context().clone(),
+        ob_ctx.clone(),
+        job.clone(),
+        true,
+    );
+
+    ctx.say(format!(
+        "info: cron_test を実行キューに入れました: `{}`",
+        job.id
+    ))
+    .await?;
+    Ok(())
+}
+
+/// Delete a registered cron job.
+#[poise::command(slash_command, prefix_command)]
+pub async fn del_cron(
+    ctx: Context<'_>,
+    #[description = "Cron ID to delete"]
+    #[autocomplete = "autocomplete_cron_id"]
+    id: String,
+) -> Result<(), Error> {
+    let Some(guild_id) = ctx.guild_id() else {
+        ctx.say("エラー: del_cron はサーバーチャンネル内でのみ使用できます。")
+            .await?;
+        return Ok(());
+    };
+
+    let ob_ctx = ctx.data();
+    let job = match ob_ctx.cron_scheduler.delete_job(&id, Some(guild_id)) {
+        Ok(job) => job,
+        Err(e) => {
+            ctx.say(format!("エラー: cron 削除に失敗しました: {e}"))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    let embed = CreateEmbed::new()
+        .title("cron削除")
+        .description("定期実行プロンプトを削除しました。")
+        .field("id", format!("`{}`", job.id), false)
+        .field("channel", format!("<#{}>", job.channel_id), true)
+        .field("schedule", format!("`{}`", job.schedule), true)
+        .field("prompt", preview_text(&job.prompt, 240), false);
+
+    ctx.send(CreateReply::default().embed(embed)).await?;
+    Ok(())
 }
 
 /// clear context
@@ -383,6 +563,73 @@ fn find_author_voice_channel(ctx: &Context<'_>) -> Option<ChannelId> {
         .and_then(|state| state.channel_id)
 }
 
+async fn require_vc_guild(ctx: &Context<'_>, command_name: &str) -> Result<Option<GuildId>, Error> {
+    let Some(guild_id) = ctx.guild_id() else {
+        send_vc_error(
+            ctx,
+            format!("{command_name} はサーバーチャンネル内でのみ使用できます。"),
+        )
+        .await?;
+        return Ok(None);
+    };
+
+    Ok(Some(guild_id))
+}
+
+fn apply_vc_dictionaries_for_ctx(ctx: &Context<'_>, text: &str) -> String {
+    let ob_ctx = ctx.data();
+    let channel_id = ctx.channel_id();
+    let user_id = ctx.author().id;
+    let guild_dictionary = ob_ctx.chat_contexts.voice_dictionary_entries(channel_id);
+    let user_dictionary = ob_ctx.user_contexts.voice_dictionary_entries(user_id);
+
+    apply_tts_dictionaries(text, &guild_dictionary, &user_dictionary)
+}
+
+fn autocomplete_dictionary_sources(entries: Vec<(String, String)>, partial: &str) -> Vec<String> {
+    let partial = partial.trim().to_lowercase();
+
+    let mut out = entries
+        .into_iter()
+        .map(|(source, _)| source)
+        .filter(|source| {
+            if partial.is_empty() {
+                return true;
+            }
+
+            let source_lc = source.to_lowercase();
+            source_lc.starts_with(&partial) || source_lc.contains(&partial)
+        })
+        .collect::<Vec<_>>();
+
+    out.sort();
+    out.dedup();
+    out.truncate(25);
+    out
+}
+
+fn build_vc_dictionary_embed(
+    title: &str,
+    description: impl Into<String>,
+    scope_name: &str,
+    scope_value: String,
+    count: usize,
+    source: &str,
+    target: &str,
+) -> CreateEmbed {
+    CreateEmbed::new()
+        .title(title)
+        .description(description)
+        .field(scope_name, scope_value, true)
+        .field(
+            "entry_count",
+            format!("{count}/{VOICE_DICTIONARY_MAX_ENTRIES}"),
+            true,
+        )
+        .field("source", preview_text(source.trim(), 120), false)
+        .field("target", preview_text(target.trim(), 120), false)
+}
+
 /// VCに接続します(VC関連の機能が有効になります)
 #[poise::command(slash_command, prefix_command)]
 pub async fn vc_join(
@@ -391,21 +638,12 @@ pub async fn vc_join(
         bool,
     >,
 ) -> Result<(), Error> {
-    let Some(guild_id) = ctx.guild_id() else {
-        send_vc_embed(
-            &ctx,
-            vc_error_embed("vc_join はサーバーチャンネル内でのみ使用できます。"),
-        )
-        .await?;
+    let Some(guild_id) = require_vc_guild(&ctx, "vc_join").await? else {
         return Ok(());
     };
 
     let Some(voice_channel) = find_author_voice_channel(&ctx) else {
-        send_vc_embed(
-            &ctx,
-            vc_error_embed("先にボイスチャンネルへ参加してください。"),
-        )
-        .await?;
+        send_vc_error(&ctx, "先にボイスチャンネルへ参加してください。").await?;
         return Ok(());
     };
 
@@ -459,12 +697,7 @@ pub async fn vc_join(
 /// VCから切断します(VC関連の機能が無効になります)
 #[poise::command(slash_command, prefix_command)]
 pub async fn vc_leave(ctx: Context<'_>) -> Result<(), Error> {
-    let Some(guild_id) = ctx.guild_id() else {
-        send_vc_embed(
-            &ctx,
-            vc_error_embed("vc_leave はサーバーチャンネル内でのみ使用できます。"),
-        )
-        .await?;
+    let Some(guild_id) = require_vc_guild(&ctx, "vc_leave").await? else {
         return Ok(());
     };
 
@@ -500,25 +733,16 @@ pub async fn vc_say(
     #[rest]
     text: String,
 ) -> Result<(), Error> {
-    let Some(guild_id) = ctx.guild_id() else {
-        send_vc_embed(
-            &ctx,
-            vc_error_embed("vc_say はサーバーチャンネル内でのみ使用できます。"),
-        )
-        .await?;
+    let Some(guild_id) = require_vc_guild(&ctx, "vc_say").await? else {
         return Ok(());
     };
 
     if text.trim().is_empty() {
-        send_vc_embed(&ctx, vc_error_embed("読み上げるテキストが空です。")).await?;
+        send_vc_error(&ctx, "読み上げるテキストが空です。").await?;
         return Ok(());
     }
 
-    let dictionary = ctx
-        .data()
-        .chat_contexts
-        .voice_dictionary_entries(ctx.channel_id());
-    let text = apply_tts_dictionary(&text, &dictionary);
+    let text = apply_vc_dictionaries_for_ctx(&ctx, &text);
     let preview = preview_text(&text, 120);
     let channel_id = ctx.channel_id();
     let parallel_count = ctx.data().chat_contexts.voice_parallel_count(channel_id);
@@ -542,11 +766,7 @@ pub async fn vc_say(
         )
         .await
     {
-        send_vc_embed(
-            &ctx,
-            vc_error_embed(format!("読み上げキューへの追加に失敗しました: {e}")),
-        )
-        .await?;
+        send_vc_error(&ctx, format!("読み上げキューへの追加に失敗しました: {e}")).await?;
         return Ok(());
     }
 
@@ -571,25 +791,22 @@ pub async fn vc_download(
     #[rest]
     text: String,
 ) -> Result<(), Error> {
-    let Some(guild_id) = ctx.guild_id() else {
-        send_vc_embed(
-            &ctx,
-            vc_error_embed("vc_download はサーバーチャンネル内でのみ使用できます。"),
-        )
-        .await?;
+    let Some(guild_id) = require_vc_guild(&ctx, "vc_download").await? else {
         return Ok(());
     };
 
     if text.trim().is_empty() {
-        send_vc_embed(&ctx, vc_error_embed("生成するテキストが空です。")).await?;
+        send_vc_error(&ctx, "生成するテキストが空です。").await?;
         return Ok(());
     }
 
-    let channel_id = ctx.channel_id();
+    if let poise::Context::Application(app_ctx) = &ctx {
+        app_ctx.defer().await?;
+    }
+
     let ob_ctx = ctx.data();
 
-    let dictionary = ob_ctx.chat_contexts.voice_dictionary_entries(channel_id);
-    let text = apply_tts_dictionary(&text, &dictionary);
+    let text = apply_vc_dictionaries_for_ctx(&ctx, &text);
     let preview = preview_text(&text, 120);
 
     let user_voice = ob_ctx.user_contexts.get_or_create(ctx.author().id);
@@ -610,7 +827,7 @@ pub async fn vc_download(
     {
         Ok(wav) => wav,
         Err(e) => {
-            send_vc_embed(
+            send_vc_embed_or_reply(
                 &ctx,
                 vc_error_embed(format!("音声ファイル生成に失敗しました: {e}")),
             )
@@ -619,20 +836,11 @@ pub async fn vc_download(
         }
     };
 
-    let speaker_name =
-        voice_catalog::speaker_name_for_id(speaker_id).unwrap_or_else(|| "(unknown)".to_string());
-    let style_name =
-        voice_catalog::style_name_for_id(speaker_id).unwrap_or_else(|| "(unknown)".to_string());
-
     let attachment = CreateAttachment::bytes(wav, "nelfie_tts.wav");
     let embed = CreateEmbed::new()
         .title("VC音声ファイル生成")
         .description("現在の設定でWAVファイルを生成しました。")
-        .field(
-            "speaker",
-            format!("{} / {} ({})", speaker_name, style_name, speaker_id),
-            false,
-        )
+        .field("speaker", format_voice_style_label(speaker_id), false)
         .field("text", preview, false);
 
     ctx.send(CreateReply::default().embed(embed).attachment(attachment))
@@ -652,12 +860,7 @@ pub async fn vc_config(
     #[description = "Read parallel count for this text channel (1..4, None: keep current)"]
     parallel_count: Option<u8>,
 ) -> Result<(), Error> {
-    let Some(guild_id) = ctx.guild_id() else {
-        send_vc_embed(
-            &ctx,
-            vc_error_embed("vc_config はサーバーチャンネル内でのみ使用できます。"),
-        )
-        .await?;
+    let Some(guild_id) = require_vc_guild(&ctx, "vc_config").await? else {
         return Ok(());
     };
 
@@ -681,12 +884,12 @@ pub async fn vc_config(
         Some(value) => {
             let value = usize::from(value);
             if !(VOICE_PARALLEL_COUNT_DEFAULT..=VOICE_PARALLEL_COUNT_MAX).contains(&value) {
-                send_vc_embed(
+                send_vc_error(
                     &ctx,
-                    vc_error_embed(format!(
+                    format!(
                         "parallel_count は {}〜{} の範囲で指定してください。",
                         VOICE_PARALLEL_COUNT_DEFAULT, VOICE_PARALLEL_COUNT_MAX
-                    )),
+                    ),
                 )
                 .await?;
                 return Ok(());
@@ -760,12 +963,7 @@ pub async fn vc_autoread(
     ctx: Context<'_>,
     #[description = "Enable auto-read for this text channel"] enabled: bool,
 ) -> Result<(), Error> {
-    let Some(guild_id) = ctx.guild_id() else {
-        send_vc_embed(
-            &ctx,
-            vc_error_embed("vc_autoread はサーバーチャンネル内でのみ使用できます。"),
-        )
-        .await?;
+    let Some(guild_id) = require_vc_guild(&ctx, "vc_autoread").await? else {
         return Ok(());
     };
 
@@ -809,12 +1007,7 @@ pub async fn vc_dict(
     #[description = "変換前の語句"] source: String,
     #[description = "読み上げ時の置換語句"] target: String,
 ) -> Result<(), Error> {
-    let Some(guild_id) = ctx.guild_id() else {
-        send_vc_embed(
-            &ctx,
-            vc_error_embed("vc_dict はサーバーチャンネル内でのみ使用できます。"),
-        )
-        .await?;
+    let Some(guild_id) = require_vc_guild(&ctx, "vc_dict").await? else {
         return Ok(());
     };
 
@@ -826,23 +1019,21 @@ pub async fn vc_dict(
     ) {
         Ok(v) => v,
         Err(e) => {
-            send_vc_embed(&ctx, vc_error_embed(format!("辞書設定に失敗しました: {e}"))).await?;
+            send_vc_error(&ctx, format!("辞書設定に失敗しました: {e}")).await?;
             return Ok(());
         }
     };
 
     let action = if updated { "更新" } else { "登録" };
-    let embed = CreateEmbed::new()
-        .title("VC辞書設定")
-        .description(format!("読み上げ辞書を{}しました。", action))
-        .field("channel", format!("<#{}>", channel_id.get()), true)
-        .field(
-            "entry_count",
-            format!("{count}/{VOICE_DICTIONARY_MAX_ENTRIES}"),
-            true,
-        )
-        .field("source", preview_text(source.trim(), 120), false)
-        .field("target", preview_text(target.trim(), 120), false);
+    let embed = build_vc_dictionary_embed(
+        "VC辞書設定",
+        format!("読み上げ辞書を{}しました。", action),
+        "channel",
+        format!("<#{}>", channel_id.get()),
+        count,
+        &source,
+        &target,
+    );
     send_vc_embed(&ctx, embed).await?;
 
     speak_vc_system_message(
@@ -863,12 +1054,7 @@ pub async fn vc_dict_delete(
     #[autocomplete = "autocomplete_vc_dict_source"]
     source: String,
 ) -> Result<(), Error> {
-    let Some(guild_id) = ctx.guild_id() else {
-        send_vc_embed(
-            &ctx,
-            vc_error_embed("vc_dict_delete はサーバーチャンネル内でのみ使用できます。"),
-        )
-        .await?;
+    let Some(guild_id) = require_vc_guild(&ctx, "vc_dict_delete").await? else {
         return Ok(());
     };
 
@@ -880,34 +1066,32 @@ pub async fn vc_dict_delete(
     {
         Ok(v) => v,
         Err(e) => {
-            send_vc_embed(&ctx, vc_error_embed(format!("辞書削除に失敗しました: {e}"))).await?;
+            send_vc_error(&ctx, format!("辞書削除に失敗しました: {e}")).await?;
             return Ok(());
         }
     };
 
     let Some(removed_target) = removed_target else {
-        send_vc_embed(
+        send_vc_error(
             &ctx,
-            vc_error_embed(format!(
+            format!(
                 "指定した語句は辞書に存在しません: {}",
                 preview_text(source.trim(), 120)
-            )),
+            ),
         )
         .await?;
         return Ok(());
     };
 
-    let embed = CreateEmbed::new()
-        .title("VC辞書削除")
-        .description("読み上げ辞書を削除しました。")
-        .field("channel", format!("<#{}>", channel_id.get()), true)
-        .field(
-            "entry_count",
-            format!("{count}/{VOICE_DICTIONARY_MAX_ENTRIES}"),
-            true,
-        )
-        .field("source", preview_text(source.trim(), 120), false)
-        .field("target", preview_text(&removed_target, 120), false);
+    let embed = build_vc_dictionary_embed(
+        "VC辞書削除",
+        "読み上げ辞書を削除しました。",
+        "channel",
+        format!("<#{}>", channel_id.get()),
+        count,
+        &source,
+        &removed_target,
+    );
     send_vc_embed(&ctx, embed).await?;
 
     speak_vc_system_message(&ctx, guild_id, "読み上げ辞書を削除しました。").await;
@@ -915,29 +1099,121 @@ pub async fn vc_dict_delete(
     Ok(())
 }
 
-async fn autocomplete_vc_dict_source(ctx: Context<'_>, partial: &str) -> Vec<String> {
-    let partial = partial.trim().to_lowercase();
+/// ユーザーごとの読み上げ辞書を登録/更新します
+#[poise::command(slash_command, prefix_command)]
+pub async fn vc_dict_user(
+    ctx: Context<'_>,
+    #[description = "変換前の語句"] source: String,
+    #[description = "読み上げ時の置換語句"] target: String,
+) -> Result<(), Error> {
+    let Some(guild_id) = require_vc_guild(&ctx, "vc_dict_user").await? else {
+        return Ok(());
+    };
 
-    let mut out = ctx
+    let user_id = ctx.author().id;
+    let (count, updated) = match ctx.data().user_contexts.set_voice_dictionary_entry(
+        user_id,
+        source.clone(),
+        target.clone(),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            send_vc_error(&ctx, format!("辞書設定に失敗しました: {e}")).await?;
+            return Ok(());
+        }
+    };
+
+    let action = if updated { "更新" } else { "登録" };
+    let embed = build_vc_dictionary_embed(
+        "VCユーザー辞書設定",
+        format!("ユーザー辞書を{}しました。", action),
+        "user",
+        format!("<@{}>", user_id.get()),
+        count,
+        &source,
+        &target,
+    );
+    send_vc_embed(&ctx, embed).await?;
+
+    speak_vc_system_message(
+        &ctx,
+        guild_id,
+        format!("ユーザー辞書を{}しました。", action),
+    )
+    .await;
+
+    Ok(())
+}
+
+/// ユーザーごとの読み上げ辞書エントリを削除します
+#[poise::command(slash_command, prefix_command)]
+pub async fn vc_dict_user_delete(
+    ctx: Context<'_>,
+    #[description = "削除する変換前の語句"]
+    #[autocomplete = "autocomplete_vc_dict_user_source"]
+    source: String,
+) -> Result<(), Error> {
+    let Some(guild_id) = require_vc_guild(&ctx, "vc_dict_user_delete").await? else {
+        return Ok(());
+    };
+
+    let user_id = ctx.author().id;
+    let (count, removed_target) = match ctx
         .data()
-        .chat_contexts
-        .voice_dictionary_entries(ctx.channel_id())
-        .into_iter()
-        .map(|(source, _)| source)
-        .filter(|source| {
-            if partial.is_empty() {
-                return true;
-            }
+        .user_contexts
+        .remove_voice_dictionary_entry(user_id, &source)
+    {
+        Ok(v) => v,
+        Err(e) => {
+            send_vc_error(&ctx, format!("辞書削除に失敗しました: {e}")).await?;
+            return Ok(());
+        }
+    };
 
-            let source_lc = source.to_lowercase();
-            source_lc.starts_with(&partial) || source_lc.contains(&partial)
-        })
-        .collect::<Vec<_>>();
+    let Some(removed_target) = removed_target else {
+        send_vc_error(
+            &ctx,
+            format!(
+                "指定した語句は辞書に存在しません: {}",
+                preview_text(source.trim(), 120)
+            ),
+        )
+        .await?;
+        return Ok(());
+    };
 
-    out.sort();
-    out.dedup();
-    out.truncate(25);
-    out
+    let embed = build_vc_dictionary_embed(
+        "VCユーザー辞書削除",
+        "ユーザー辞書を削除しました。",
+        "user",
+        format!("<@{}>", user_id.get()),
+        count,
+        &source,
+        &removed_target,
+    );
+    send_vc_embed(&ctx, embed).await?;
+
+    speak_vc_system_message(&ctx, guild_id, "ユーザー辞書を削除しました。").await;
+
+    Ok(())
+}
+
+async fn autocomplete_vc_dict_source(ctx: Context<'_>, partial: &str) -> Vec<String> {
+    autocomplete_dictionary_sources(
+        ctx.data()
+            .chat_contexts
+            .voice_dictionary_entries(ctx.channel_id()),
+        partial,
+    )
+}
+
+async fn autocomplete_vc_dict_user_source(ctx: Context<'_>, partial: &str) -> Vec<String> {
+    autocomplete_dictionary_sources(
+        ctx.data()
+            .user_contexts
+            .voice_dictionary_entries(ctx.author().id),
+        partial,
+    )
 }
 
 /// VOICEVOXの話者とスタイルを設定します（ユーザーごと）
@@ -954,12 +1230,7 @@ pub async fn vc_speaker(
     #[description = "音高 (-1.0〜1.0, 省略時は現状維持)"] pitch: Option<f32>,
     #[description = "左右pan (-1.0=左, 0.0=中央, 1.0=右, 省略時は現状維持)"] pan: Option<f32>,
 ) -> Result<(), Error> {
-    let Some(guild_id) = ctx.guild_id() else {
-        send_vc_embed(
-            &ctx,
-            vc_error_embed("vc_speaker はサーバーチャンネル内でのみ使用できます。"),
-        )
-        .await?;
+    let Some(guild_id) = require_vc_guild(&ctx, "vc_speaker").await? else {
         return Ok(());
     };
 
@@ -971,25 +1242,25 @@ pub async fn vc_speaker(
                 .take(20)
                 .collect::<Vec<_>>()
                 .join(", ");
-            send_vc_embed(
+            send_vc_error(
                 &ctx,
-                vc_error_embed(format!(
+                format!(
                     "話者 '{}' は見つかりません。候補（先頭20件）: {}",
                     speaker, speaker_preview
-                )),
+                ),
             )
             .await?;
             return Ok(());
         }
 
-        send_vc_embed(
+        send_vc_error(
             &ctx,
-            vc_error_embed(format!(
+            format!(
                 "話者 '{}' にスタイル '{}' はありません。候補: {}",
                 speaker,
                 style,
                 styles.join(", ")
-            )),
+            ),
         )
         .await?;
         return Ok(());
@@ -997,11 +1268,7 @@ pub async fn vc_speaker(
 
     let speed = match speed {
         Some(v) if !(0.5..=2.0).contains(&v) => {
-            send_vc_embed(
-                &ctx,
-                vc_error_embed("speed は 0.5〜2.0 の範囲で指定してください。"),
-            )
-            .await?;
+            send_vc_error(&ctx, "speed は 0.5〜2.0 の範囲で指定してください。").await?;
             return Ok(());
         }
         Some(v) => Some(v),
@@ -1010,11 +1277,7 @@ pub async fn vc_speaker(
 
     let pitch = match pitch {
         Some(v) if !(-1.0..=1.0).contains(&v) => {
-            send_vc_embed(
-                &ctx,
-                vc_error_embed("pitch は -1.0〜1.0 の範囲で指定してください。"),
-            )
-            .await?;
+            send_vc_error(&ctx, "pitch は -1.0〜1.0 の範囲で指定してください。").await?;
             return Ok(());
         }
         Some(v) => Some(v),
@@ -1023,11 +1286,7 @@ pub async fn vc_speaker(
 
     let pan = match pan {
         Some(v) if !(-1.0..=1.0).contains(&v) => {
-            send_vc_embed(
-                &ctx,
-                vc_error_embed("pan は -1.0〜1.0 の範囲で指定してください。"),
-            )
-            .await?;
+            send_vc_error(&ctx, "pan は -1.0〜1.0 の範囲で指定してください。").await?;
             return Ok(());
         }
         Some(v) => Some(v),
@@ -1084,6 +1343,44 @@ async fn autocomplete_vc_speaker(_ctx: Context<'_>, partial: &str) -> Vec<String
     voice_catalog::suggest_speakers(partial, 25)
 }
 
+async fn autocomplete_cron_id(ctx: Context<'_>, partial: &str) -> Vec<AutocompleteChoice> {
+    let Some(guild_id) = ctx.guild_id() else {
+        return Vec::new();
+    };
+
+    let partial = partial.trim().to_lowercase();
+    ctx.data()
+        .cron_scheduler
+        .jobs_for_guild(guild_id)
+        .into_iter()
+        .filter(|job| {
+            if partial.is_empty() {
+                return true;
+            }
+
+            let haystack = format!(
+                "{} {} {} {}",
+                job.id, job.channel_id, job.schedule, job.prompt
+            )
+            .to_lowercase();
+            haystack.contains(&partial)
+        })
+        .take(25)
+        .map(|job| AutocompleteChoice::new(format_cron_autocomplete_label(&job), job.id))
+        .collect()
+}
+
+fn format_cron_autocomplete_label(job: &crate::app::cron::CronJob) -> String {
+    let label = format!(
+        "{} | #{} | {} | {}",
+        job.id,
+        job.channel_id,
+        job.schedule,
+        preview_text(&job.prompt, 48)
+    );
+    preview_text(&label, 99)
+}
+
 fn selected_vc_speaker_from_ctx(ctx: Context<'_>) -> Option<String> {
     let poise::Context::Application(app_ctx) = ctx else {
         return None;
@@ -1121,12 +1418,7 @@ async fn autocomplete_vc_style(ctx: Context<'_>, partial: &str) -> Vec<Autocompl
 /// VOICEVOXの話者設定と状態を取得します（ユーザーごと）
 #[poise::command(slash_command, prefix_command)]
 pub async fn vc_status(ctx: Context<'_>) -> Result<(), Error> {
-    let Some(guild_id) = ctx.guild_id() else {
-        send_vc_embed(
-            &ctx,
-            vc_error_embed("vc_status はサーバーチャンネル内でのみ使用できます。"),
-        )
-        .await?;
+    let Some(guild_id) = require_vc_guild(&ctx, "vc_status").await? else {
         return Ok(());
     };
 
@@ -1141,29 +1433,15 @@ pub async fn vc_status(ctx: Context<'_>) -> Result<(), Error> {
     let auto_read = ob_ctx.chat_contexts.is_voice_auto_read(channel_id);
     let system_read = ob_ctx.chat_contexts.is_voice_system_read(channel_id);
     let dict_entries = ob_ctx.chat_contexts.voice_dictionary_count(channel_id);
+    let user_dict_entries = ob_ctx.user_contexts.voice_dictionary_count(ctx.author().id);
     let user_voice = ob_ctx.user_contexts.get_or_create(ctx.author().id);
     let user_speaker = user_voice.voice_speaker;
     let speaker_text = user_speaker
-        .map(|id| {
-            let speaker_name = voice_catalog::speaker_name_for_id(id)
-                .unwrap_or_else(|| "(unknown speaker)".to_string());
-            let style_name = voice_catalog::style_name_for_id(id)
-                .unwrap_or_else(|| "(unknown style)".to_string());
-            format!("{} / {} ({})", speaker_name, style_name, id)
-        })
+        .map(format_voice_style_label)
         .unwrap_or_else(|| format!("{} (guild default)", guild_voice_cfg.speaker));
-    let speed_text = user_voice
-        .voice_speed_scale
-        .map(|v| format!("{v:.2}"))
-        .unwrap_or_else(|| "1.00 (default)".to_string());
-    let pitch_text = user_voice
-        .voice_pitch_scale
-        .map(|v| format!("{v:.2}"))
-        .unwrap_or_else(|| "0.00 (default)".to_string());
-    let pan_text = user_voice
-        .voice_pan
-        .map(|v| format!("{v:.2}"))
-        .unwrap_or_else(|| "0.00 (default)".to_string());
+    let speed_text = format_optional_voice_value(user_voice.voice_speed_scale, "1.00 (default)");
+    let pitch_text = format_optional_voice_value(user_voice.voice_pitch_scale, "0.00 (default)");
+    let pan_text = format_optional_voice_value(user_voice.voice_pan, "0.00 (default)");
 
     let current_vc = voice_channel
         .map(|id| format!("<#{}>", id))
@@ -1208,6 +1486,11 @@ pub async fn vc_status(ctx: Context<'_>) -> Result<(), Error> {
         .field(
             "tts_dict_entries(this_channel)",
             format!("{dict_entries}/{VOICE_DICTIONARY_MAX_ENTRIES}"),
+            true,
+        )
+        .field(
+            "tts_dict_entries(user)",
+            format!("{user_dict_entries}/{VOICE_DICTIONARY_MAX_ENTRIES}"),
             true,
         )
         .field(
@@ -1285,8 +1568,40 @@ async fn send_vc_embed(ctx: &Context<'_>, embed: CreateEmbed) -> Result<(), Erro
     Ok(())
 }
 
+async fn send_vc_embed_or_reply(ctx: &Context<'_>, embed: CreateEmbed) -> Result<(), Error> {
+    match ctx {
+        poise::Context::Application(_) => {
+            ctx.send(CreateReply::default().embed(embed)).await?;
+        }
+        poise::Context::Prefix(_) => {
+            send_vc_embed(ctx, embed).await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn send_vc_error(ctx: &Context<'_>, message: impl Into<String>) -> Result<(), Error> {
+    send_vc_embed(ctx, vc_error_embed(message.into())).await
+}
+
 fn vc_error_embed(message: impl Into<String>) -> CreateEmbed {
     CreateEmbed::new().title("VCエラー").description(message)
+}
+
+fn format_voice_style_label(style_id: u32) -> String {
+    let speaker_name =
+        voice_catalog::speaker_name_for_id(style_id).unwrap_or_else(|| "(unknown)".to_string());
+    let style_name =
+        voice_catalog::style_name_for_id(style_id).unwrap_or_else(|| "(unknown)".to_string());
+
+    format!("{} / {} ({})", speaker_name, style_name, style_id)
+}
+
+fn format_optional_voice_value(value: Option<f32>, fallback: &str) -> String {
+    value
+        .map(|v| format!("{v:.2}"))
+        .unwrap_or_else(|| fallback.to_string())
 }
 
 fn preview_text(input: &str, max_chars: usize) -> String {
@@ -1314,8 +1629,7 @@ async fn speak_vc_system_message(ctx: &Context<'_>, guild_id: GuildId, text: imp
         return;
     }
 
-    let dictionary = ob_ctx.chat_contexts.voice_dictionary_entries(channel_id);
-    let text = apply_tts_dictionary(&text.into(), &dictionary);
+    let text = apply_vc_dictionaries_for_ctx(ctx, &text.into());
     let user_voice = ob_ctx.user_contexts.get_or_create(ctx.author().id);
     let parallel_count = ob_ctx.chat_contexts.voice_parallel_count(channel_id);
 
