@@ -11,9 +11,6 @@ pub struct Config {
     pub system_prompt: String,
     pub rale_limit_window_size: u64,
     pub rate_limit_sec_per_cost: u64,
-    pub web_server_host: [u8; 4],
-    pub web_server_local_ip: [u8; 4],
-    pub web_server_port: u16,
     pub admin_users: Vec<u64>,
     pub timeout_millis: u64,
     pub voicevox_default_speaker: u32,
@@ -26,6 +23,7 @@ pub struct Config {
     pub voicevox_vvm_dir: String,
     pub voicevox_onnxruntime_filename: String,
     pub gemini: GeminiConfig,
+    pub nim: NimConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -36,6 +34,13 @@ pub struct GeminiConfig {
     pub auto_models: Vec<String>,
     pub enable_google_search: bool,
     pub max_tool_loops: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct NimConfig {
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+    pub default_model: String,
 }
 
 impl Config {
@@ -56,6 +61,7 @@ impl Config {
 あなたの名前はNelfie(ネルフィー)ですよ。
 あと絵文字つかわないで つかうなら顔文字つかうように
 ハイテンションやめておちついてほしい
+数式をユーザーに見せる必要がある場合は latex_expr_render ツールを使って出してください。
 ".to_string());
         let voicevox_default_speaker = std::env::var("VOICEVOX_DEFAULT_SPEAKER")
             .ok()
@@ -140,6 +146,10 @@ impl Config {
             .and_then(|v| v.parse::<usize>().ok())
             .map(|v| v.clamp(1, 20))
             .unwrap_or(10);
+        let nim_api_key = std::env::var("NIM_API_KEY").ok();
+        let nim_base_url = std::env::var("NIM_BASE_URL").ok();
+        let nim_default_model = std::env::var("NIM_DEFAULT_MODEL")
+            .unwrap_or_else(|_| "nvidia/llama-3.1-nemotron-nano-8b-v1".to_string());
 
         Config {
             discord_token,
@@ -147,9 +157,6 @@ impl Config {
             system_prompt,
             rale_limit_window_size: 16200,
             rate_limit_sec_per_cost: 600,
-            web_server_host: [0, 0, 0, 0],
-            web_server_local_ip: [192, 168, 0, 26],
-            web_server_port: 96,
             admin_users: vec![855371530270408725],
             timeout_millis: 100_000,
             voicevox_default_speaker,
@@ -168,6 +175,11 @@ impl Config {
                 auto_models: gemini_auto_models,
                 enable_google_search: gemini_enable_google_search,
                 max_tool_loops: gemini_max_tool_loops,
+            },
+            nim: NimConfig {
+                api_key: nim_api_key,
+                base_url: nim_base_url,
+                default_model: nim_default_model,
             },
         }
     }
@@ -197,6 +209,7 @@ pub enum Models {
     Gemini30Pro,
     Gemini31Pro,
     GeminiAuto,
+    NimDefault,
 }
 
 impl From<Models> for String {
@@ -210,6 +223,7 @@ impl From<Models> for String {
             Models::Gemini30Pro => "gemini-3.0-pro".to_string(),
             Models::Gemini31Pro => "gemini-3.1-pro".to_string(),
             Models::GeminiAuto => "gemini-auto".to_string(),
+            Models::NimDefault => "nim-default".to_string(),
         }
     }
 }
@@ -235,6 +249,7 @@ impl From<String> for Models {
             "gemini-2.5-flash" => Models::Gemini30Flash,
             "gemini-2.5-pro" => Models::Gemini30Pro,
             "gemini-auto" => Models::GeminiAuto,
+            "nim-default" => Models::NimDefault,
             _ => Models::default(),
         }
     }
@@ -251,6 +266,7 @@ impl Models {
             Models::Gemini30Pro,
             Models::Gemini31Pro,
             Models::GeminiAuto,
+            Models::NimDefault,
         ]
     }
 
@@ -264,6 +280,7 @@ impl Models {
             Models::Gemini30Pro => 6,
             Models::Gemini31Pro => 7,
             Models::GeminiAuto => 4,
+            Models::NimDefault => 3,
         }
     }
 
@@ -277,6 +294,7 @@ impl Models {
             Models::Gemini30Pro => "gemini-3.0-pro",
             Models::Gemini31Pro => "gemini-3.1-pro",
             Models::GeminiAuto => "gemini-auto",
+            Models::NimDefault => "nim-default",
         };
 
         ModelResponseParams {

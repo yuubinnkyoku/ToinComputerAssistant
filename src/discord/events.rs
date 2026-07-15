@@ -6,9 +6,9 @@ use std::{
 
 use log::{debug, info, warn};
 use serenity::all::{
-    ActionRowComponent, ActivityData, ChannelId, CreateInteractionResponse,
+    ActionRowComponent, ActivityData, ChannelId, CreateAttachment, CreateInteractionResponse,
     CreateInteractionResponseMessage, CreateMessage, EditMessage, FullEvent, GuildId, Interaction,
-    Message, VoiceState,
+    Message, UserId, VoiceState,
 };
 use tokio::{sync::mpsc, time::sleep};
 
@@ -19,7 +19,7 @@ use crate::{
         client::{LMContext, Role},
         router::generate_response_by_model,
     },
-    voice::{SpeakOptions, apply_tts_dictionary, build_tts_text_from_message},
+    voice::{SpeakOptions, apply_tts_dictionaries, build_tts_text_from_message},
 };
 
 /// イベントハンドラ
@@ -76,6 +76,87 @@ pub async fn event_handler(
     }
 
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+pub struct CronResponseRequest {
+    pub cron_id: String,
+    pub schedule: String,
+    pub prompt: String,
+    pub manual: bool,
+    pub guild_id: GuildId,
+    pub channel_id: ChannelId,
+}
+
+#[derive(Clone)]
+enum ResponseOrigin {
+    Message(Box<Message>),
+    Cron(CronResponseRequest),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RateLimitTarget {
+    User(UserId),
+    GuildBot {
+        guild_id: GuildId,
+        bot_user_id: UserId,
+    },
+}
+
+impl ResponseOrigin {
+    fn channel_id(&self) -> ChannelId {
+        match self {
+            Self::Message(msg) => msg.channel_id,
+            Self::Cron(cron) => cron.channel_id,
+        }
+    }
+
+    fn guild_id(&self) -> Option<GuildId> {
+        match self {
+            Self::Message(msg) => msg.guild_id,
+            Self::Cron(cron) => Some(cron.guild_id),
+        }
+    }
+
+    fn rate_limit_target(&self, bot_user_id: UserId) -> RateLimitTarget {
+        match self {
+            Self::Message(msg) => {
+                if msg.author.id == bot_user_id
+                    && let Some(guild_id) = msg.guild_id
+                {
+                    RateLimitTarget::GuildBot {
+                        guild_id,
+                        bot_user_id,
+                    }
+                } else {
+                    RateLimitTarget::User(msg.author.id)
+                }
+            }
+            Self::Cron(cron) => RateLimitTarget::GuildBot {
+                guild_id: cron.guild_id,
+                bot_user_id,
+            },
+        }
+    }
+
+    fn system_note(&self) -> Option<String> {
+        match self {
+            Self::Message(_) => None,
+            Self::Cron(cron) => Some(format!(
+                "This request was triggered by a registered cron schedule. \
+                 It is an automated scheduled prompt, not a live user mention. \
+                 cron_id: {}, cron_expression: {}, manual_test: {}",
+                cron.cron_id, cron.schedule, cron.manual
+            )),
+        }
+    }
+
+    fn thinking_label(&self) -> &'static str {
+        match self {
+            Self::Message(_) => "-# Thinking...",
+            Self::Cron(_) => "-# Scheduled task running...",
+        }
+    }
 }
 
 async fn handle_voice_state_update(
@@ -192,10 +273,13 @@ async fn handle_voice_state_update(
         format!("{} がボイスチャンネルから退出しました。", display_name)
     };
 
-    let dictionary = ob_context
+    let guild_dictionary = ob_context
         .chat_contexts
         .voice_dictionary_entries(text_channel);
-    let phrase = apply_tts_dictionary(&phrase, &dictionary);
+    let user_dictionary = ob_context
+        .user_contexts
+        .voice_dictionary_entries(new.user_id);
+    let phrase = apply_tts_dictionaries(&phrase, &guild_dictionary, &user_dictionary);
     let parallel_count = ob_context.chat_contexts.voice_parallel_count(text_channel);
 
     if let Err(e) = ob_context
@@ -381,17 +465,25 @@ async fn handle_message(
     if let Some(guild_id) = msg.guild_id
         && ob_context.chat_contexts.is_voice_auto_read(channel_id)
     {
-        let user_voice = ob_context.user_contexts.get_or_create(msg.author.id);
+        let user_voice =
+            ob_context
+                .user_contexts
+                .get_or_create_actor(msg.author.id, msg.guild_id, bot_id);
         let speaker = user_voice.voice_speaker;
         let speed_scale = user_voice.voice_speed_scale;
         let pitch_scale = user_voice.voice_pitch_scale;
         let pan = user_voice.voice_pan;
 
         if let Some(base_text) = build_tts_text_from_message(&ctx.cache, msg) {
-            let dictionary = ob_context
+            let guild_dictionary = ob_context
                 .chat_contexts
                 .voice_dictionary_entries(channel_id);
-            let text = apply_tts_dictionary(&base_text, &dictionary);
+            let user_dictionary = ob_context.user_contexts.voice_dictionary_entries_actor(
+                msg.author.id,
+                msg.guild_id,
+                bot_id,
+            );
+            let text = apply_tts_dictionaries(&base_text, &guild_dictionary, &user_dictionary);
             let parallel_count = ob_context.chat_contexts.voice_parallel_count(channel_id);
 
             if let Err(e) = ob_context
@@ -485,18 +577,54 @@ fn schedule_latest_response(
     msg: &Message,
     ob_context: &NelfieContext,
 ) {
-    let channel_id = msg.channel_id;
+    schedule_response(
+        ctx,
+        ob_context,
+        ResponseOrigin::Message(Box::new(msg.clone())),
+    );
+}
+
+pub fn schedule_cron_response(
+    ctx: &serenity::client::Context,
+    ob_context: &NelfieContext,
+    cron: CronResponseRequest,
+) {
+    let mut lm_context = LMContext::new();
+    lm_context.add_text(
+        serde_json::json!({
+            "type": "scheduled_cron_prompt",
+            "cron_id": &cron.cron_id,
+            "cron_expression": &cron.schedule,
+            "manual_test": cron.manual,
+            "guild_id": cron.guild_id.to_string(),
+            "channel_id": cron.channel_id.to_string(),
+            "prompt": &cron.prompt,
+        })
+        .to_string(),
+        Role::User,
+    );
+    ob_context.chat_contexts.marge(cron.channel_id, &lm_context);
+
+    schedule_response(ctx, ob_context, ResponseOrigin::Cron(cron));
+}
+
+fn schedule_response(
+    ctx: &serenity::client::Context,
+    ob_context: &NelfieContext,
+    origin: ResponseOrigin,
+) {
+    let channel_id = origin.channel_id();
     let request_id = ob_context.response_seq.fetch_add(1, Ordering::Relaxed);
 
     ob_context.responding_channels.insert(channel_id, true);
 
     let ctx_cloned = ctx.clone();
-    let msg_cloned = msg.clone();
     let ob_ctx_cloned = ob_context.clone();
+    let origin_cloned = origin.clone();
 
     let task_handle = tokio::spawn(async move {
         if let Err(e) =
-            run_response_task(&ctx_cloned, &msg_cloned, &ob_ctx_cloned, request_id).await
+            run_response_task(&ctx_cloned, &ob_ctx_cloned, origin_cloned, request_id).await
         {
             log_err("run_response_task", e.as_ref());
         }
@@ -522,15 +650,25 @@ fn schedule_latest_response(
 
 async fn run_response_task(
     ctx: &serenity::client::Context,
-    msg: &Message,
     ob_context: &NelfieContext,
+    origin: ResponseOrigin,
     request_id: u64,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let start = Instant::now();
-    let channel_id = msg.channel_id;
-    let user_id = msg.author.id;
+    let channel_id = origin.channel_id();
+    let guild_id = origin.guild_id();
+    let bot_user_id = ctx.cache.current_user().id;
+    let rate_limit_target = origin.rate_limit_target(bot_user_id);
 
-    let user_ctx = ob_context.user_contexts.get_or_create(user_id);
+    let user_ctx = match rate_limit_target {
+        RateLimitTarget::User(user_id) => ob_context.user_contexts.get_or_create(user_id),
+        RateLimitTarget::GuildBot {
+            guild_id,
+            bot_user_id,
+        } => ob_context
+            .user_contexts
+            .get_or_create_guild_bot(guild_id, bot_user_id),
+    };
     let model = user_ctx.main_model.clone();
 
     let model_cost = model.rate_cost();
@@ -552,7 +690,7 @@ async fn run_response_task(
     if added_user_line > limit_line {
         let wait_sec = added_user_line - limit_line;
         let allow_ts = time_stamp + wait_sec;
-        msg.channel_id
+        channel_id
             .send_message(
                 &ctx.http,
                 CreateMessage::new().content(format!(
@@ -563,9 +701,19 @@ async fn run_response_task(
             .await?;
         return Ok(());
     }
-    ob_context
-        .user_contexts
-        .set_rate_line(user_id, added_user_line);
+    match rate_limit_target {
+        RateLimitTarget::User(user_id) => ob_context
+            .user_contexts
+            .set_rate_line(user_id, added_user_line),
+        RateLimitTarget::GuildBot {
+            guild_id,
+            bot_user_id,
+        } => {
+            ob_context
+                .user_contexts
+                .set_guild_bot_rate_line(guild_id, bot_user_id, added_user_line)
+        }
+    }
 
     let typing_ctx = ctx.clone();
     let typing_ob_ctx = ob_context.clone();
@@ -589,25 +737,32 @@ async fn run_response_task(
 
     let mut context = ob_context.chat_contexts.get_or_create(channel_id);
     let tools = ob_context.tools.clone();
+    let channel_name = channel_id
+        .name(&ctx.http)
+        .await
+        .unwrap_or("None".to_string());
 
-    let system_prompt = format!(
+    let mut system_prompt = format!(
         "{}\n current guild_id: {}, current channel_id: {}, channel_name: {}",
         ob_context.chat_contexts.get_system_prompt(channel_id),
-        msg.guild_id
+        guild_id
             .map(|id| id.get().to_string())
             .unwrap_or_else(|| "None".to_string()),
-        msg.channel_id,
-        msg.channel_id
-            .name(&ctx.http)
-            .await
-            .unwrap_or("None".to_string()),
+        channel_id,
+        channel_name,
     );
+    if let Some(note) = origin.system_note() {
+        system_prompt.push('\n');
+        system_prompt.push_str(&note);
+    }
 
     context.add_text(system_prompt, Role::System);
 
-    let mut thinking_msg = msg
-        .channel_id
-        .send_message(&ctx.http, CreateMessage::new().content("-# Thinking..."))
+    let mut thinking_msg = channel_id
+        .send_message(
+            &ctx.http,
+            CreateMessage::new().content(origin.thinking_label()),
+        )
         .await?;
 
     let (state_tx, mut state_rx) = mpsc::channel::<String>(100);
@@ -706,8 +861,6 @@ async fn run_response_task(
 
     typing_handle.abort();
 
-    let model = ob_context.user_contexts.get_or_create(user_id).main_model;
-
     if let Err(e) = thinking_msg.delete(&ctx.http).await {
         warn!("failed to delete thinking message: {}", e);
     }
@@ -719,15 +872,8 @@ async fn run_response_task(
         return Ok(());
     }
 
-    msg.channel_id
-        .send_message(
-            &ctx.http,
-            CreateMessage::new().content(format!(
-                "{}\n-# Reasoning done in {}ms, model: {}",
-                text, elapsed, model
-            )),
-        )
-        .await?;
+    let footer = format!("-# Reasoning done in {}ms, model: {}", elapsed, model);
+    send_long_message(&ctx.http, channel_id, &text, &footer).await?;
 
     Ok(())
 }
@@ -738,4 +884,214 @@ fn is_same_text_loosely(a: &str, b: &str) -> bool {
 
 fn normalize_text(s: &str) -> String {
     s.split_whitespace().collect::<Vec<&str>>().join(" ")
+}
+
+const DISCORD_MESSAGE_LIMIT: usize = 2000;
+
+struct CodeAttachment {
+    filename: String,
+    content: String,
+}
+
+async fn send_long_message(
+    http: &serenity::http::Http,
+    channel_id: serenity::all::ChannelId,
+    text: &str,
+    footer: &str,
+) -> Result<(), serenity::Error> {
+    let (text, attachments) = extract_code_blocks(text);
+    let text = text.trim();
+
+    if text.is_empty() {
+        if !attachments.is_empty() {
+            send_code_attachments(http, channel_id, &attachments).await?;
+        }
+        if !footer.is_empty() {
+            channel_id
+                .send_message(http, CreateMessage::new().content(footer))
+                .await?;
+        }
+        return Ok(());
+    }
+
+    let total_len = text.chars().count() + 1 + footer.chars().count();
+    if !footer.is_empty() && total_len <= DISCORD_MESSAGE_LIMIT {
+        channel_id
+            .send_message(
+                http,
+                CreateMessage::new().content(format!("{}\n{}", text, footer)),
+            )
+            .await?;
+    } else {
+        let chunks = split_message_chunks(text, DISCORD_MESSAGE_LIMIT);
+        for chunk in chunks {
+            if chunk.trim().is_empty() {
+                continue;
+            }
+            channel_id
+                .send_message(http, CreateMessage::new().content(chunk))
+                .await?;
+        }
+
+        if !footer.is_empty() {
+            channel_id
+                .send_message(http, CreateMessage::new().content(footer))
+                .await?;
+        }
+    }
+
+    if !attachments.is_empty() {
+        send_code_attachments(http, channel_id, &attachments).await?;
+    }
+
+    Ok(())
+}
+
+async fn send_code_attachments(
+    http: &serenity::http::Http,
+    channel_id: serenity::all::ChannelId,
+    attachments: &[CodeAttachment],
+) -> Result<(), serenity::Error> {
+    for attachment in attachments {
+        if attachment.content.trim().is_empty() {
+            continue;
+        }
+
+        let file = CreateAttachment::bytes(
+            attachment.content.as_bytes().to_vec(),
+            attachment.filename.clone(),
+        );
+        let message = CreateMessage::new()
+            .content(format!("[code file] {}", attachment.filename))
+            .add_file(file);
+
+        channel_id.send_message(http, message).await?;
+    }
+
+    Ok(())
+}
+
+fn extract_code_blocks(text: &str) -> (String, Vec<CodeAttachment>) {
+    let mut out = String::with_capacity(text.len());
+    let mut attachments = Vec::new();
+    let mut cursor = 0usize;
+    let mut index = 1usize;
+
+    while let Some(rel_start) = text[cursor..].find("```") {
+        let start = cursor + rel_start;
+        out.push_str(&text[cursor..start]);
+
+        let after_ticks = start + 3;
+        let Some(rel_end) = text[after_ticks..].find("```") else {
+            out.push_str(&text[start..]);
+            return (out, attachments);
+        };
+
+        let end = after_ticks + rel_end;
+        let raw = &text[after_ticks..end];
+        let (lang, code) = split_code_block(raw);
+        let code = code.trim_end_matches(['\n', '\r']);
+
+        if !code.trim().is_empty() {
+            let filename = build_code_filename(index, lang);
+            attachments.push(CodeAttachment {
+                filename: filename.clone(),
+                content: code.to_string(),
+            });
+            out.push_str(&format!("[code: {}]", filename));
+            index += 1;
+        }
+
+        cursor = end + 3;
+    }
+
+    out.push_str(&text[cursor..]);
+    (out, attachments)
+}
+
+fn split_code_block(raw: &str) -> (Option<&str>, &str) {
+    let Some(newline) = raw.find('\n') else {
+        return (None, raw);
+    };
+
+    let first = raw[..newline].trim();
+    if first.is_empty() {
+        (None, &raw[newline + 1..])
+    } else {
+        (Some(first), &raw[newline + 1..])
+    }
+}
+
+fn build_code_filename(index: usize, lang: Option<&str>) -> String {
+    let ext = lang.and_then(code_extension_for_language).unwrap_or("txt");
+    format!("code-{}.{}", index, ext)
+}
+
+fn code_extension_for_language(lang: &str) -> Option<&'static str> {
+    match lang.trim().to_ascii_lowercase().as_str() {
+        "rs" | "rust" => Some("rs"),
+        "py" | "python" => Some("py"),
+        "js" | "javascript" => Some("js"),
+        "ts" | "typescript" => Some("ts"),
+        "json" => Some("json"),
+        "toml" => Some("toml"),
+        "yaml" | "yml" => Some("yml"),
+        "md" | "markdown" => Some("md"),
+        "sh" | "bash" | "shell" => Some("sh"),
+        "ps1" | "powershell" => Some("ps1"),
+        "c" => Some("c"),
+        "cpp" | "c++" | "cc" => Some("cpp"),
+        "h" => Some("h"),
+        "go" => Some("go"),
+        "java" => Some("java"),
+        "kt" | "kotlin" => Some("kt"),
+        "sql" => Some("sql"),
+        "html" => Some("html"),
+        "css" => Some("css"),
+        _ => None,
+    }
+}
+
+fn split_message_chunks(text: &str, limit: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+
+    while !rest.is_empty() {
+        let mut count = 0usize;
+        let mut last_break: Option<(usize, usize)> = None;
+        let mut split_at: Option<(usize, usize)> = None;
+
+        for (idx, ch) in rest.char_indices() {
+            count += 1;
+            if ch.is_whitespace() {
+                last_break = Some((idx, ch.len_utf8()));
+            }
+            if count >= limit {
+                split_at = Some((idx, ch.len_utf8()));
+                break;
+            }
+        }
+
+        let Some((idx, len)) = split_at else {
+            let trimmed = rest.trim();
+            if !trimmed.is_empty() {
+                out.push(trimmed.to_string());
+            }
+            break;
+        };
+
+        let (end, next_start) = match last_break {
+            Some((break_idx, break_len)) if break_idx > 0 => (break_idx, break_idx + break_len),
+            _ => (idx + len, idx + len),
+        };
+
+        let head = rest[..end].trim_end();
+        if !head.is_empty() {
+            out.push(head.to_string());
+        }
+
+        rest = rest[next_start..].trim_start_matches(|c: char| c.is_whitespace());
+    }
+
+    out
 }

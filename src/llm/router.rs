@@ -10,6 +10,7 @@ use crate::{
     llm::{
         client::{LMContext, LMTool},
         gemini::client::GeminiClient,
+        nim,
     },
 };
 
@@ -76,6 +77,21 @@ pub async fn generate_response_by_model(
             gemini
                 .generate_response_with_fallback(
                     &auto_models,
+                    ob_ctx,
+                    lm_context,
+                    max_tokens,
+                    tools,
+                    state_mpsc,
+                    delta_mpsc,
+                )
+                .await
+        }
+        Models::NimDefault => {
+            let nim_client = nim::client::NimClient::new(ob_ctx.config.nim.clone());
+            let nim_model = ob_ctx.config.nim.default_model.clone();
+            nim_client
+                .generate_response_with_model(
+                    &nim_model,
                     ob_ctx,
                     lm_context,
                     max_tokens,

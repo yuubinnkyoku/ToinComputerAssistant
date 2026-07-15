@@ -39,6 +39,9 @@ OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxx
 
 # 以下optional
 SYSTEM_PROMPT=あなたのシステムプロンプト
+NIM_BASE_URL=https://integrate.api.nvidia.com/v1
+NIM_API_KEY=nvapi-xxxxxxxxxxxxxxxx
+NIM_DEFAULT_MODEL=nvidia/llama-3.1-nemotron-nano-8b-v1
 VOICEVOX_DEFAULT_SPEAKER=3
 VOICEVOX_CORE_ACCELERATION=auto
 VOICEVOX_CORE_CPU_THREADS=0
@@ -63,6 +66,8 @@ v0.1.4以降はserenityの起動とdownloaderの起動が直列化しました�
 
 現在の実装では、環境変数（`.env`）から読み込みます。
 `DISCORD_TOKEN` と `OPENAI_API_KEY` は未設定だと起動時にエラーになります。
+NVIDIA NIM は `/model set nim-default` を選んだときのみ使用します。
+NIM 使用時は `NIM_BASE_URL` と `NIM_API_KEY` が必要です。
 
 ## 主なコマンド
 
@@ -81,6 +86,9 @@ CHAT BOT:
 - `/model`: 使用する OpenAI モデルを選択
 - `/rate_config`: レート制限の設定(管理者のみ)
 - `/set_system_prompt`: システムプロンプトの設定(管理者のみ)
+- `/cron <cron> <prompt>`: 実行したチャンネルに、cron 表記で定期実行プロンプトを登録
+- `/cron_test [id]`: 登録済み cron を時刻に関係なく即時実行
+- `/del_cron <id>`: 登録済み cron を削除
 
 VC / TTS:
 
@@ -93,6 +101,8 @@ VC / TTS:
 - `/vc_speaker ...`: 話者, スタイル, 音程, 速さ, パンの設定を行います。
 - `/vc_status`: 現在の VC 状態と VOICEVOX 設定を表示します。
 - `/vc_config ...`: 読み上げの詳細設定を行います。(自動読み上げ, システム読み上げ, 並列読み上げ)
+
+cron は実行環境のローカル時刻で、標準的な 5 フィールド表記（例: `*/30 * * * *`）を使います。prefix command では cron 表記を `"*/30 * * * *"` のように引用してください。AI も `cron-tool` で cron の作成・一覧・削除を行えます。cron 実行は bot 自身の guild 単位のユーザー状態として扱われるため、bot に対する `/rate_config` はそのサーバー内の cron 実行にも適用されます。
 
 ## 開発用チェック
 
@@ -113,7 +123,7 @@ fmtはやってない。
 
 ## Third-party licenses
 
-- KaTeX font のライセンスは [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) に記載しています。
-- `KaTeX_font` ディレクトリを再配布する場合は、上記ライセンス表記を同梱してください。
+- KaTeX font と Noto Serif JP のライセンスは [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) に記載しています。
+- `fonts` ディレクトリを再配布する場合は、上記ライセンス表記を同梱してください。
 
 ダウンロードコンテンツはREADMEを含むのでそちらを参照。
