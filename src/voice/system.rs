@@ -264,6 +264,17 @@ impl VoiceSystem {
         handler.current_channel().map(|cid| cid.0.get())
     }
 
+    pub fn connected_voice_guild_ids(&self) -> Vec<GuildId> {
+        self.songbird_manager()
+            .map(|manager| {
+                manager
+                    .iter()
+                    .map(|(guild_id, _)| GuildId::new(guild_id.0.get()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub async fn speak(
         &self,
         guild_id: GuildId,
@@ -293,7 +304,7 @@ impl VoiceSystem {
         }
 
         if self.current_voice_channel_raw(guild_id).await.is_none() {
-            let err = "Not connected to a voice channel. Run /vc_join first.".to_string();
+            let err = "Not connected to a voice channel. Run /vc join first.".to_string();
             self.set_last_error(guild_id, err.clone());
             return Err(err);
         }

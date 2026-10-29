@@ -1,71 +1,69 @@
-use std::{collections::HashMap, sync::Arc};
-
-use tokio::sync::mpsc;
-
 use crate::{
-    app::{
-        config::{ModelResponseParams, Models},
-        context::NelfieContext,
-    },
+    app::context::NelfieContext,
     llm::{
-        client::{LMContext, LMTool},
+        client::{GenerateResponseOptions, GenerateResponseResult},
+        context::LMContext,
         gemini::client::GeminiClient,
+        models::Models,
         nim,
+        tool::ToolExecutionContext,
     },
 };
 
-#[allow(clippy::too_many_arguments)]
+/// Model-based backend routing (fork-specific).
+///
+/// The selected model is read from `options.parameters`, mirroring how the
+/// upstream OpenAI client is invoked from `discord::responses`. Gemini and
+/// NIM models are served by their isolated clients; every other model falls
+/// through to the upstream OpenAI client unchanged.
 pub async fn generate_response_by_model(
     ob_ctx: NelfieContext,
-    model: Models,
     lm_context: &LMContext,
-    max_tokens: Option<u32>,
-    tools: Option<Arc<HashMap<String, Box<dyn LMTool>>>>,
-    state_mpsc: Option<mpsc::Sender<String>>,
-    delta_mpsc: Option<mpsc::Sender<String>>,
-) -> Result<LMContext, Box<dyn std::error::Error + Send + Sync>> {
-    match model {
-        Models::Gemini30Flash => {
+    options: GenerateResponseOptions,
+) -> Result<GenerateResponseResult, Box<dyn std::error::Error + Send + Sync>> {
+    let model = Models::from_name(&options.parameters.model).unwrap_or_default();
+
+    if !model.is_gemini() && !matches!(model, Models::NimDefault) {
+        let lm_client = ob_ctx.lm_client.clone();
+        return lm_client
+            .generate_response(ob_ctx, lm_context, options)
+            .await;
+    }
+
+    let GenerateResponseOptions {
+        max_output_tokens,
+        tools,
+        state_sender,
+        parameters: _,
+        user_context_scope,
+        allow_mainline_model_change,
+        // Gemini/NIM have no OpenAI prompt-cache key or per-token rate usage
+        // reporting; dropping the sender simply closes that channel.
+        context_cache_key: _,
+        rate_usage_sender: _,
+    } = options;
+
+    let tool_context = ToolExecutionContext {
+        user_context_scope,
+        allow_mainline_model_change,
+        image_generation_enabled: false,
+    };
+    let max_tokens = Some(max_output_tokens);
+
+    let context = match model {
+        Models::Gemini30Flash | Models::Gemini30Pro | Models::Gemini31Pro => {
             let gemini = GeminiClient::new(ob_ctx.config.gemini.clone());
             gemini
                 .generate_response_with_model(
-                    "gemini-3.0-flash",
+                    &model.to_string(),
                     ob_ctx,
                     lm_context,
                     max_tokens,
-                    tools,
-                    state_mpsc,
-                    delta_mpsc,
+                    Some(tools),
+                    state_sender,
+                    tool_context,
                 )
-                .await
-        }
-        Models::Gemini30Pro => {
-            let gemini = GeminiClient::new(ob_ctx.config.gemini.clone());
-            gemini
-                .generate_response_with_model(
-                    "gemini-3.0-pro",
-                    ob_ctx,
-                    lm_context,
-                    max_tokens,
-                    tools,
-                    state_mpsc,
-                    delta_mpsc,
-                )
-                .await
-        }
-        Models::Gemini31Pro => {
-            let gemini = GeminiClient::new(ob_ctx.config.gemini.clone());
-            gemini
-                .generate_response_with_model(
-                    "gemini-3.1-pro",
-                    ob_ctx,
-                    lm_context,
-                    max_tokens,
-                    tools,
-                    state_mpsc,
-                    delta_mpsc,
-                )
-                .await
+                .await?
         }
         Models::GeminiAuto => {
             let gemini = GeminiClient::new(ob_ctx.config.gemini.clone());
@@ -80,11 +78,11 @@ pub async fn generate_response_by_model(
                     ob_ctx,
                     lm_context,
                     max_tokens,
-                    tools,
-                    state_mpsc,
-                    delta_mpsc,
+                    Some(tools),
+                    state_sender,
+                    tool_context,
                 )
-                .await
+                .await?
         }
         Models::NimDefault => {
             let nim_client = nim::client::NimClient::new(ob_ctx.config.nim.clone());
@@ -95,29 +93,17 @@ pub async fn generate_response_by_model(
                     ob_ctx,
                     lm_context,
                     max_tokens,
-                    tools,
-                    state_mpsc,
-                    delta_mpsc,
+                    Some(tools),
+                    state_sender,
                 )
-                .await
+                .await?
         }
-        _ => {
-            let params = ModelResponseParams {
-                model: model.to_string(),
-                ..model.to_parameter()
-            };
-            ob_ctx
-                .lm_client
-                .generate_response(
-                    ob_ctx.clone(),
-                    lm_context,
-                    max_tokens,
-                    tools,
-                    state_mpsc,
-                    delta_mpsc,
-                    Some(params),
-                )
-                .await
-        }
-    }
+        _ => unreachable!("non-OpenAI models are matched above"),
+    };
+
+    Ok(GenerateResponseResult {
+        context,
+        generated_images: Vec::new(),
+        final_model: model,
+    })
 }

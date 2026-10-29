@@ -5,8 +5,8 @@ use log::{error, warn};
 use serde_json::{Value, json};
 use serenity::all::{GuildId, UserId};
 
-use crate::app::config::Models;
 use crate::llm::channel::{VOICE_DICTIONARY_MAX_ENTRIES, VoiceDictionaryEntry};
+use crate::llm::models::{ImageGenerationModels, Models};
 
 const USER_CONTEXTS_STORE_PATH: &str = "data/runtime/user_contexts.json";
 
@@ -22,7 +22,9 @@ pub struct UserContexts {
 pub struct UserContext {
     pub user_id: UserId,
     pub main_model: Models,
+    pub image_generation_model: ImageGenerationModels,
     pub rate_line: u64,
+    pub cron_rate_line: u64,
     pub voice_speaker: Option<u32>,
     pub voice_speed_scale: Option<f32>,
     pub voice_pitch_scale: Option<f32>,
@@ -31,11 +33,21 @@ pub struct UserContext {
 }
 
 impl UserContext {
-    pub fn new(user_id: UserId) -> UserContext {
-        UserContext {
+    pub fn new(user_id: UserId) -> Self {
+        Self::with_model(user_id, Models::USER_DEFAULT_MODEL)
+    }
+
+    fn new_system(user_id: UserId) -> Self {
+        Self::with_model(user_id, Models::SYSTEM_MODEL)
+    }
+
+    fn with_model(user_id: UserId, main_model: Models) -> Self {
+        Self {
             user_id,
-            main_model: Models::default(),
+            main_model,
+            image_generation_model: ImageGenerationModels::DEFAULT,
             rate_line: 1,
+            cron_rate_line: 1,
             voice_speaker: None,
             voice_speed_scale: None,
             voice_pitch_scale: None,
@@ -96,7 +108,7 @@ impl UserContexts {
         match self.guild_bot_contexts.entry(guild_id) {
             dashmap::mapref::entry::Entry::Occupied(entry) => entry.get().clone(),
             dashmap::mapref::entry::Entry::Vacant(vacant) => {
-                let ctx = UserContext::new(bot_user_id);
+                let ctx = UserContext::new_system(bot_user_id);
                 let out = ctx.clone();
                 vacant.insert(ctx);
                 out
@@ -131,6 +143,47 @@ impl UserContexts {
         self.save_to_disk();
     }
 
+    pub fn set_model_scoped(&self, scope: UserContextScope, model: Models) {
+        match scope {
+            UserContextScope::User(user_id) => self.set_model(user_id, model),
+            UserContextScope::GuildBot {
+                guild_id,
+                bot_user_id,
+            } => {
+                self.guild_bot_contexts
+                    .entry(guild_id)
+                    .or_insert_with(|| UserContext::new_system(bot_user_id))
+                    .main_model = model;
+                self.save_to_disk();
+            }
+        }
+    }
+
+    pub fn set_image_generation_model_scoped(
+        &self,
+        scope: UserContextScope,
+        model: ImageGenerationModels,
+    ) {
+        match scope {
+            UserContextScope::User(user_id) => {
+                self.contexts
+                    .entry(user_id)
+                    .or_insert_with(|| UserContext::new(user_id))
+                    .image_generation_model = model;
+            }
+            UserContextScope::GuildBot {
+                guild_id,
+                bot_user_id,
+            } => {
+                self.guild_bot_contexts
+                    .entry(guild_id)
+                    .or_insert_with(|| UserContext::new_system(bot_user_id))
+                    .image_generation_model = model;
+            }
+        }
+        self.save_to_disk();
+    }
+
     pub fn set_rate_line(&self, user_id: UserId, rate_line: u64) {
         let old_rate_line;
         {
@@ -154,7 +207,7 @@ impl UserContexts {
             let mut entry = self
                 .guild_bot_contexts
                 .entry(guild_id)
-                .or_insert_with(|| UserContext::new(bot_user_id));
+                .or_insert_with(|| UserContext::new_system(bot_user_id));
 
             old_rate_line = entry.rate_line;
             entry.rate_line = rate_line;
@@ -172,6 +225,55 @@ impl UserContexts {
                 guild_id,
                 bot_user_id,
             } => self.set_guild_bot_rate_line(guild_id, bot_user_id, rate_line),
+        }
+    }
+
+    pub fn set_cron_rate_line(&self, user_id: UserId, rate_line: u64) {
+        let old_rate_line;
+        {
+            let mut entry = self
+                .contexts
+                .entry(user_id)
+                .or_insert_with(|| UserContext::new(user_id));
+
+            old_rate_line = entry.cron_rate_line;
+            entry.cron_rate_line = rate_line;
+        }
+
+        if old_rate_line == 0 || rate_line == 0 {
+            self.save_to_disk();
+        }
+    }
+
+    pub fn set_guild_bot_cron_rate_line(
+        &self,
+        guild_id: GuildId,
+        bot_user_id: UserId,
+        rate_line: u64,
+    ) {
+        let old_rate_line;
+        {
+            let mut entry = self
+                .guild_bot_contexts
+                .entry(guild_id)
+                .or_insert_with(|| UserContext::new_system(bot_user_id));
+
+            old_rate_line = entry.cron_rate_line;
+            entry.cron_rate_line = rate_line;
+        }
+
+        if old_rate_line == 0 || rate_line == 0 {
+            self.save_to_disk();
+        }
+    }
+
+    pub fn set_cron_rate_line_scoped(&self, scope: UserContextScope, rate_line: u64) {
+        match scope {
+            UserContextScope::User(user_id) => self.set_cron_rate_line(user_id, rate_line),
+            UserContextScope::GuildBot {
+                guild_id,
+                bot_user_id,
+            } => self.set_guild_bot_cron_rate_line(guild_id, bot_user_id, rate_line),
         }
     }
 
@@ -224,6 +326,7 @@ impl UserContexts {
         user_id: UserId,
         source: String,
         target: String,
+        registered_by: Option<UserId>,
     ) -> Result<(usize, bool), String> {
         let source = source.trim().to_string();
         let target = target.trim().to_string();
@@ -247,6 +350,7 @@ impl UserContexts {
                 .find(|item| item.source == source)
             {
                 existing.target = target;
+                existing.updated_by = registered_by;
                 (entry.voice_dictionary.len(), true)
             } else {
                 if entry.voice_dictionary.len() >= VOICE_DICTIONARY_MAX_ENTRIES {
@@ -256,9 +360,12 @@ impl UserContexts {
                     ));
                 }
 
-                entry
-                    .voice_dictionary
-                    .push(VoiceDictionaryEntry { source, target });
+                entry.voice_dictionary.push(VoiceDictionaryEntry {
+                    source,
+                    target,
+                    registered_by,
+                    updated_by: registered_by,
+                });
                 (entry.voice_dictionary.len(), false)
             }
         };
@@ -316,6 +423,13 @@ impl UserContexts {
             .unwrap_or_default()
     }
 
+    pub fn voice_dictionary_records(&self, user_id: UserId) -> Vec<VoiceDictionaryEntry> {
+        self.contexts
+            .get(&user_id)
+            .map(|entry| entry.voice_dictionary.clone())
+            .unwrap_or_default()
+    }
+
     pub fn voice_dictionary_entries_scoped(
         &self,
         scope: UserContextScope,
@@ -368,17 +482,18 @@ impl UserContexts {
     }
 
     fn save_to_disk(&self) {
-        let default_model_name = Models::default().to_string();
+        let user_default_model_name = Models::USER_DEFAULT_MODEL.to_string();
+        let system_model_name = Models::SYSTEM_MODEL.to_string();
         let entries = self
             .contexts
             .iter()
-            .filter_map(|entry| user_context_to_json(entry.value(), &default_model_name))
+            .filter_map(|entry| user_context_to_json(entry.value(), &user_default_model_name))
             .collect::<Vec<Value>>();
         let guild_bot_entries = self
             .guild_bot_contexts
             .iter()
             .filter_map(|entry| {
-                let mut obj = user_context_to_json(entry.value(), &default_model_name)?;
+                let mut obj = user_context_to_json(entry.value(), &system_model_name)?;
                 obj["guild_id"] = json!(entry.key().get().to_string());
                 Some(obj)
             })
@@ -431,7 +546,8 @@ impl UserContexts {
 
         if let Some(contexts) = doc.get("contexts").and_then(Value::as_array) {
             for ctx in contexts {
-                if let Some(user_context) = user_context_from_json(ctx) {
+                if let Some(user_context) = user_context_from_json(ctx, Models::USER_DEFAULT_MODEL)
+                {
                     self.contexts.insert(user_context.user_id, user_context);
                 }
             }
@@ -444,7 +560,7 @@ impl UserContexts {
                     continue;
                 };
 
-                if let Some(user_context) = user_context_from_json(ctx) {
+                if let Some(user_context) = user_context_from_json(ctx, Models::SYSTEM_MODEL) {
                     self.guild_bot_contexts.insert(guild_id, user_context);
                 }
             }
@@ -467,7 +583,9 @@ fn parse_u64(value: &Value) -> Option<u64> {
 fn user_context_to_json(value: &UserContext, default_model_name: &str) -> Option<Value> {
     let model_name = value.main_model.to_string();
     if model_name == default_model_name
+        && value.image_generation_model == ImageGenerationModels::DEFAULT
         && value.rate_line != 0
+        && value.cron_rate_line != 0
         && value.voice_speaker.is_none()
         && value.voice_speed_scale.is_none()
         && value.voice_pitch_scale.is_none()
@@ -480,10 +598,15 @@ fn user_context_to_json(value: &UserContext, default_model_name: &str) -> Option
     let mut obj = json!({
         "user_id": value.user_id.get().to_string(),
         "main_model": model_name,
+        "image_generation_model": value.image_generation_model.to_string(),
     });
 
     if value.rate_line == 0 {
         obj["rate_line"] = json!(0u64);
+    }
+
+    if value.cron_rate_line == 0 {
+        obj["cron_rate_line"] = json!(0u64);
     }
 
     if let Some(speaker) = value.voice_speaker {
@@ -507,10 +630,7 @@ fn user_context_to_json(value: &UserContext, default_model_name: &str) -> Option
             value
                 .voice_dictionary
                 .iter()
-                .map(|item| json!({
-                    "source": item.source,
-                    "target": item.target,
-                }))
+                .map(VoiceDictionaryEntry::to_json_value)
                 .collect::<Vec<Value>>()
         );
     }
@@ -518,14 +638,23 @@ fn user_context_to_json(value: &UserContext, default_model_name: &str) -> Option
     Some(obj)
 }
 
-fn user_context_from_json(ctx: &Value) -> Option<UserContext> {
+fn user_context_from_json(ctx: &Value, default_model: Models) -> Option<UserContext> {
     let user_id = ctx.get("user_id").and_then(parse_u64).map(UserId::new)?;
     let model = ctx
         .get("main_model")
         .and_then(Value::as_str)
-        .map(|s| Models::from(s.to_string()))
+        .and_then(Models::from_name)
+        .unwrap_or(default_model);
+    let image_generation_model = ctx
+        .get("image_generation_model")
+        .and_then(Value::as_str)
+        .and_then(ImageGenerationModels::from_name)
         .unwrap_or_default();
     let rate_line = ctx.get("rate_line").and_then(Value::as_u64).unwrap_or(1);
+    let cron_rate_line = ctx
+        .get("cron_rate_line")
+        .and_then(Value::as_u64)
+        .unwrap_or(1);
     let voice_speaker = ctx
         .get("voice_speaker")
         .and_then(parse_u64)
@@ -547,25 +676,7 @@ fn user_context_from_json(ctx: &Value) -> Option<UserContext> {
         .and_then(Value::as_array)
         .map(|arr| {
             arr.iter()
-                .filter_map(|item| {
-                    let source = item
-                        .get("source")
-                        .or_else(|| item.get("key"))
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(ToOwned::to_owned)?;
-
-                    let target = item
-                        .get("target")
-                        .or_else(|| item.get("value"))
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(ToOwned::to_owned)?;
-
-                    Some(VoiceDictionaryEntry { source, target })
-                })
+                .filter_map(VoiceDictionaryEntry::from_json_value)
                 .take(VOICE_DICTIONARY_MAX_ENTRIES)
                 .collect::<Vec<_>>()
         })
@@ -574,7 +685,9 @@ fn user_context_from_json(ctx: &Value) -> Option<UserContext> {
     Some(UserContext {
         user_id,
         main_model: model,
+        image_generation_model,
         rate_line,
+        cron_rate_line,
         voice_speaker,
         voice_speed_scale,
         voice_pitch_scale,

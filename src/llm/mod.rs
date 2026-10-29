@@ -1,7 +1,12 @@
-pub mod client;
 pub mod channel;
+pub mod client;
+pub mod compaction;
+pub mod context;
 pub mod gemini;
+pub mod models;
 pub mod nim;
+pub mod prompt;
 pub mod router;
-pub mod user;
+pub mod tool;
 pub mod tools;
+pub mod user;

@@ -8,7 +8,7 @@ use crate::{
     app::config::GeminiConfig,
     app::context::NelfieContext,
     llm::{
-        client::{LMContext, LMTool, Role},
+        context::{LMContext, Role},
         gemini::{
             mapper::lm_context_to_contents,
             schema::to_gemini_schema,
@@ -17,6 +17,7 @@ use crate::{
                 GenerateContentResponse, GenerationConfig, GoogleSearch, Part, Tool,
             },
         },
+        tool::{LMTool, ToolExecutionContext},
     },
 };
 
@@ -43,7 +44,7 @@ impl GeminiClient {
         max_tokens: Option<u32>,
         tools: Option<Arc<HashMap<String, Box<dyn LMTool>>>>,
         state_mpsc: Option<mpsc::Sender<String>>,
-        delta_mpsc: Option<mpsc::Sender<String>>,
+        tool_context: ToolExecutionContext,
     ) -> Result<LMContext, Box<dyn std::error::Error + Send + Sync>> {
         let api_key = self
             .config
@@ -56,12 +57,6 @@ impl GeminiClient {
 
         let state_send = |s: String| {
             if let Some(tx) = state_mpsc.as_ref() {
-                let _ = tx.clone().try_send(s);
-            }
-        };
-
-        let delta_send = |s: String| {
-            if let Some(tx) = delta_mpsc.as_ref() {
                 let _ = tx.clone().try_send(s);
             }
         };
@@ -114,7 +109,6 @@ impl GeminiClient {
                     && !text.is_empty()
                 {
                     delta_context.add_text(text.clone(), Role::Assistant);
-                    delta_send(text.clone());
                 }
 
                 if let Some(function_call) = &part.function_call {
@@ -122,7 +116,14 @@ impl GeminiClient {
                     state_send(format!("Executing tool: {}", function_call.name));
 
                     let output_text = if let Some(tool) = tools_map.get(&function_call.name) {
-                        match tool.execute(function_call.args.clone(), ob_ctx.clone()).await {
+                        match tool
+                            .execute_with_context(
+                                function_call.args.clone(),
+                                ob_ctx.clone(),
+                                tool_context,
+                            )
+                            .await
+                        {
                             Ok(v) => v,
                             Err(e) => format!("Error: {}", e),
                         }
@@ -164,7 +165,7 @@ impl GeminiClient {
         max_tokens: Option<u32>,
         tools: Option<Arc<HashMap<String, Box<dyn LMTool>>>>,
         state_mpsc: Option<mpsc::Sender<String>>,
-        delta_mpsc: Option<mpsc::Sender<String>>,
+        tool_context: ToolExecutionContext,
     ) -> Result<LMContext, Box<dyn std::error::Error + Send + Sync>> {
         let mut errors = Vec::new();
 
@@ -182,7 +183,7 @@ impl GeminiClient {
                     max_tokens,
                     tools.clone(),
                     state_mpsc.clone(),
-                    delta_mpsc.clone(),
+                    tool_context,
                 )
                 .await
             {

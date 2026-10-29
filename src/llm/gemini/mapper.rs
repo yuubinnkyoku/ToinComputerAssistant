@@ -1,11 +1,11 @@
 use async_openai::types::responses::{
-    EasyInputContent, InputContent, InputItem, InputRole, Item, MessageItem,
+    EasyInputContent, InputContent, InputItem, InputRole, Item, MessageItem, OutputMessageContent,
 };
 use base64::{Engine as _, engine::general_purpose};
 use reqwest::Client;
 
 use crate::llm::{
-    client::{LMContext, Role},
+    context::{LMContext, Role},
     gemini::types::{Content, InlineData, Part},
 };
 
@@ -52,8 +52,8 @@ pub async fn lm_context_to_contents(http: &Client, lm_context: &LMContext) -> Ge
                     }
                 }
             }
-            InputItem::Item(Item::Message(message_item)) => {
-                if let MessageItem::Input(input) = message_item {
+            InputItem::Item(Item::Message(message_item)) => match message_item {
+                MessageItem::Input(input) => {
                     let parts = convert_input_contents(http, &input.content).await;
                     if !parts.is_empty() {
                         if matches!(input.role, InputRole::System | InputRole::Developer) {
@@ -64,7 +64,32 @@ pub async fn lm_context_to_contents(http: &Client, lm_context: &LMContext) -> Ge
                         }
                     }
                 }
-            }
+                // Assistant messages produced by the OpenAI path are stored as
+                // output messages; keep them visible when switching backends.
+                MessageItem::Output(output) => {
+                    let parts = output
+                        .content
+                        .iter()
+                        .filter_map(|content| match content {
+                            OutputMessageContent::OutputText(text) if !text.text.is_empty() => {
+                                Some(Part {
+                                    text: Some(text.text.clone()),
+                                    inline_data: None,
+                                    function_call: None,
+                                    function_response: None,
+                                })
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    if !parts.is_empty() {
+                        out.push(Content {
+                            role: "model".to_string(),
+                            parts,
+                        });
+                    }
+                }
+            },
             _ => {}
         }
     }

@@ -3214,9 +3214,8 @@ dependencies = [
 
 [[package]]
 name = "nelfie"
-version = "0.1.9"
+version = "0.1.13"
 dependencies = [
- "anyhow",
  "async-openai",
  "async-trait",
  "base64",
@@ -5836,7 +5835,6 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot 0.12.5",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2 0.6.4",

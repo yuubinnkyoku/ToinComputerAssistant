@@ -9,7 +9,10 @@ use tokio::sync::mpsc;
 
 use crate::{
     app::{config::NimConfig, context::NelfieContext},
-    llm::client::{LMContext, LMTool, Role},
+    llm::{
+        context::{LMContext, Role},
+        tool::LMTool,
+    },
 };
 
 #[derive(Clone)]
@@ -35,7 +38,6 @@ impl NimClient {
         max_tokens: Option<u32>,
         _tools: Option<Arc<HashMap<String, Box<dyn LMTool>>>>,
         state_mpsc: Option<mpsc::Sender<String>>,
-        delta_mpsc: Option<mpsc::Sender<String>>,
     ) -> Result<LMContext, Box<dyn std::error::Error + Send + Sync>> {
         let base_url = self
             .config
@@ -50,12 +52,6 @@ impl NimClient {
 
         let state_send = |s: String| {
             if let Some(tx) = state_mpsc.as_ref() {
-                let _ = tx.clone().try_send(s);
-            }
-        };
-
-        let delta_send = |s: String| {
-            if let Some(tx) = delta_mpsc.as_ref() {
                 let _ = tx.clone().try_send(s);
             }
         };
@@ -103,8 +99,7 @@ impl NimClient {
         }
 
         let mut delta_context = LMContext::new();
-        delta_context.add_text(text.clone(), Role::Assistant);
-        delta_send(text);
+        delta_context.add_text(text, Role::Assistant);
         Ok(delta_context)
     }
 }
